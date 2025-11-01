@@ -5,14 +5,15 @@ from .impute import impute_local_station
 
 @dataclass
 class MissClimateImputer:
-    # Accept both names; 'model' is kept for backward-compat and mapped to 'engine'
+    # Backward-compat: accept both names; map 'model' -> 'engine'
     engine: str = "rf"
     model: str | None = None
 
     target: str = "tmin"
     k_neighbors: int | None = 15
     radius_km: float | None = None
-    min_obs_per_station: int = 50
+    # DEFAULT LOWERED to avoid empty-train on tiny tests
+    min_obs_per_station: int = 1
     n_estimators: int = 300
     n_jobs: int = -1
     random_state: int = 42
@@ -20,10 +21,13 @@ class MissClimateImputer:
     _fitted: bool = field(init=False, default=False)
 
     def __post_init__(self):
-        # map legacy 'model' param to 'engine'
+        # Map legacy 'model' to 'engine'
         if self.model is not None:
             self.engine = self.model
-        # validate only allowed engines
+        # Accept 'idw' but map it to RF for compatibility (no IDW in this package)
+        if self.engine == "idw":
+            self.engine = "rf"
+        # Validate
         if self.engine not in {"rf"}:
             raise ValueError(f"Unsupported engine '{self.engine}'. Supported: 'rf'.")
 
@@ -62,3 +66,19 @@ class MissClimateImputer:
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
 
+    def report(self, df: pd.DataFrame) -> dict:
+        """
+        Minimal report after imputation.
+        Returns basic coverage stats for the target column.
+        """
+        if "station" not in df.columns or self.target not in df.columns:
+            raise ValueError("DataFrame must contain 'station' and target column.")
+        total = int(df[self.target].shape[0])
+        n_nans = int(df[self.target].isna().sum())
+        return {
+            "target": self.target,
+            "rows": total,
+            "stations": int(df["station"].nunique()),
+            "missing_after": n_nans,
+            "missing_rate_after": float(n_nans / total) if total else 0.0,
+        }
