@@ -1,0 +1,6 @@
+
+pytest>=7.0
+coverage>=7.0
+pre-commit>=3.0
+mkdocs>=1.5
+mkdocs-material>=9.5

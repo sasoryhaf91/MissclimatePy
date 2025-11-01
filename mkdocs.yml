@@ -1,0 +1,8 @@
+
+site_name: MissclimatePy
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - API: api.md
+repo_url: https://github.com/youruser/missclimatepy

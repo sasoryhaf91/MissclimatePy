@@ -1,0 +1,10 @@
+
+cff-version: 1.2.0
+title: "MissclimatePy: Missing-Data Imputation for Climate Time Series"
+authors:
+  - family-names: YourLast
+    given-names: YourFirst
+version: "0.1.0"
+license: MIT
+repository-code: "https://github.com/youruser/missclimatepy"
+keywords: [climate, imputation, random-forest, idw, meteorology]
