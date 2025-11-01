@@ -13,7 +13,7 @@ def impute_local_station(
     target_var: str,
     k_neighbors: int | None = 15,
     radius_km: float | None = None,
-    min_obs_per_station: int = 50,
+    min_obs_per_station: int = 1,
     train_frac: float = 1.0,
     n_estimators: int = 300,
     n_jobs: int = -1,
