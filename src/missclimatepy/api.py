@@ -5,7 +5,10 @@ from .impute import impute_local_station
 
 @dataclass
 class MissClimateImputer:
+    # Accept both names; 'model' is kept for backward-compat and mapped to 'engine'
     engine: str = "rf"
+    model: str | None = None
+
     target: str = "tmin"
     k_neighbors: int | None = 15
     radius_km: float | None = None
@@ -15,6 +18,14 @@ class MissClimateImputer:
     random_state: int = 42
 
     _fitted: bool = field(init=False, default=False)
+
+    def __post_init__(self):
+        # map legacy 'model' param to 'engine'
+        if self.model is not None:
+            self.engine = self.model
+        # validate only allowed engines
+        if self.engine not in {"rf"}:
+            raise ValueError(f"Unsupported engine '{self.engine}'. Supported: 'rf'.")
 
     def fit(self, df: pd.DataFrame):
         req = {"station","date","latitude","longitude","elevation", self.target}
@@ -50,3 +61,4 @@ class MissClimateImputer:
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
+
