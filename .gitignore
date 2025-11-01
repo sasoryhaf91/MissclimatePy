@@ -1,13 +1,24 @@
 
+# Environments & caches
 .venv/
 __pycache__/
 *.pyc
 *.pyo
 *.DS_Store
+.ipynb_checkpoints/
+
+# Build artifacts
 dist/
 build/
 *.egg-info/
-.ipynb_checkpoints/
+
+# Coverage
 coverage.xml
 .htmlcov/
--e "\n# Artifacts\n*.parquet\n*.csv\n" 
+
+# Data artifacts
+*.parquet
+*.csv
+*.feather
+*.arrow
+
