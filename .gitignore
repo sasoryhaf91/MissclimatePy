@@ -10,3 +10,4 @@ build/
 .ipynb_checkpoints/
 coverage.xml
 .htmlcov/
+-e "\n# Artifacts\n*.parquet\n*.csv\n" 
