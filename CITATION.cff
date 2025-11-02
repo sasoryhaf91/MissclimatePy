@@ -1,10 +1,14 @@
-
 cff-version: 1.2.0
-title: "MissclimatePy: Missing-Data Imputation for Climate Time Series"
-authors:
-  - family-names: YourLast
-    given-names: YourFirst
+message: "If you use this software, please cite it as below."
+title: "MissclimatePy: Missing-Data Imputation for Climate Time Series (x, y, z + calendar only)"
 version: "0.1.0"
-license: MIT
-repository-code: "https://github.com/youruser/missclimatepy"
-keywords: [climate, imputation, random-forest, idw, meteorology]
+date-released: "2025-11-01"
+doi: "10.5281/zenodo.TBA"
+authors:
+- name: Hugo Antonio-Fernández
+- name: Humberto Vaquera-Huerta
+- name: Moisés Michel Rosengaus-Moshinsky
+- name: Paulino Pérez-Rodríguez
+- name: José Crossa
+repository-code: "https://github.com/sasoryhaf91/MissclimatePy"
+license: "MIT"

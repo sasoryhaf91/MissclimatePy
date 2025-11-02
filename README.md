@@ -12,37 +12,44 @@
 
 ## 🧭 Philosophy
 
-MissclimatePy focuses on **local imputation** of missing climate records using only:
+**MissclimatePy** focuses on *local imputation* of missing climate records using only:
 
-- Spatial coordinates: **latitude, longitude, elevation**  
-- Temporal descriptors: **year, month, day-of-year**, and optionally **harmonic sin/cos transforms**
+- **Spatial coordinates:** latitude, longitude, elevation  
+- **Temporal descriptors:** year, month, day-of-year (and optionally harmonic sin/cos transforms)
 
 This design ensures:
-- Independence from external covariates (e.g., nearby variables or reanalysis data)
-- Robust estimation even under high missingness
-- Fully reproducible workflows through deterministic seeds and transparent validation
+
+- Independence from external covariates or gridded data sources  
+- Robust estimation even under high missingness  
+- Fully reproducible workflows through deterministic seeds and transparent validation  
 
 ---
 
 ## ⚙️ Core Framework
 
-MissclimatePy implements a **Minimum Data Requirement (MDR)** approach:
-- Defines the **minimum percentage of valid data** required for model training.
-- Evaluates imputation stability under varying inclusion levels (e.g., 10–80%).
-- Uses **spatio-temporal neighbors** (based on t, x, y, z proximity) to reinforce local predictions.
+MissclimatePy introduces a **Minimum Data Requirement (MDR)** approach for robust local imputation:
+
+- Defines the *minimum percentage of valid data* required for model training.  
+- Evaluates imputation *stability* under varying inclusion levels (e.g., 10–80%).  
+- Uses *spatio-temporal neighbors* (based on t, x, y, z proximity) to reinforce local learning.  
+- Quantifies uncertainty and reconstruction reliability across multiple masking scenarios.
+
+Each model is trained **locally per station** using Random Forest regressors constrained to `(t, x, y, z)` inputs.
 
 ---
 
-## 📦 Install
+## 📦 Installation
 
 ```bash
 pip install -U pip
 pip install .
-# or dev
+# or for development
 pip install -e ".[dev]"
 ```
 
-## Quickstart
+---
+
+## 🚀 Quickstart
 
 ```python
 import pandas as pd
@@ -56,37 +63,60 @@ df = pd.DataFrame({
     "tmin": [8.0, None, 7.5, 9.0, None, 8.2]
 })
 
-# Fit and impute
+# Local RF-based imputation
 imp = MissClimateImputer(
-    model="rf",
+    engine="rf",
     target="tmin",
+    k_neighbors=5,        # spatio-temporal neighbors
+    min_obs_per_station=30,
     n_estimators=100,
-    min_data=0.3,       # minimum inclusion (30% valid data)
-    n_neighbors=5,      # spatio-temporal neighbors
     n_jobs=-1
 )
 
 out = imp.fit_transform(df)
 print(imp.report(out))
-
 ```
-## API
-- `MissClimateImputer.fit(df)`
-- `MissClimateImputer.transform(df)`
-- `MissClimateImputer.fit_transform(df)`
-- `MissClimateImputer.report(df_valid)`
-- `MissClimateImputer.plot_series(station)`
 
-## Methods included
-- `rf`: Random Forest baseline (AI).
+---
 
-## Reproducibility
-- Tests (`pytest`)
-- Deterministic seeds for replicability
-- Includes examples/example_minimal.pyexample 
+## 🧩 API Overview
 
-## Citation
-See `CITATION.cff`.
+| Method | Description |
+|:--|:--|
+| `fit(df)` | Validates structure and prepares model. |
+| `transform(df)` | Imputes missing values in all stations. |
+| `fit_transform(df)` | Fits and imputes in one step. |
+| `report(df)` | Returns MAE, RMSE, R² and coverage metrics. |
+| `estimate_mdr(df, target, ...)` | Evaluates Minimum Data Requirement (MDR) through masking. |
 
-## License
-MIT. See `LICENSE`.
+---
+
+## 🧠 Methods Included
+
+- `rf`: Random Forest baseline (AI-based local model)
+- (future) `mlp`: Multi-Layer Perceptron baseline
+- (future) `rf+xgb`: Hybrid Random Forest–XGBoost
+
+---
+
+## 🔁 Reproducibility
+
+- Unit tests via `pytest`  
+- Deterministic seeds for consistent runs  
+- Includes `/examples/example_minimal.py`  
+- Continuous Integration (CI) via GitHub Actions  
+
+---
+
+## 🔬 Citation
+
+See [`CITATION.cff`](CITATION.cff) for citation format.
+
+> Fernández H.A. (2025). *MissclimatePy: Missing-Data Imputation for Climate Time Series (x, y, z + calendar only).*  
+> Version 0.1.0. DOI: [10.5281/zenodo.TBA](https://doi.org/TBA)
+
+---
+
+## 📜 License
+MIT License © 2025 Hugo Antonio Fernández  
+See [`LICENSE`](LICENSE) for details.
