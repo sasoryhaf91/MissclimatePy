@@ -3,36 +3,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Iterable, Dict, Any
-
 import os
 import pandas as pd
 
-from .prepare import (
-    enforce_schema,
-    filter_period,
-    missing_summary,
-    select_stations,
-)
+from .prepare import enforce_schema, filter_period, missing_summary, select_stations
 from .api import MissClimateImputer
 from .evaluate import evaluate_per_station
-from .viz import plot_station_series, plot_metrics_distribution
+
+# ---- Lazy/optional viz imports (so package works without viz.py) ----
+_HAS_VIZ = True
+try:
+    from .viz import plot_station_series, plot_metrics_distribution
+except Exception:  # viz not available in this build; define no-ops
+    _HAS_VIZ = False
+
+    def plot_station_series(*args, **kwargs):
+        return None
+
+    def plot_metrics_distribution(*args, **kwargs):
+        return None
 
 
 # ------------------------------- Utilities --------------------------------- #
 def _load_dataframe(path: str) -> pd.DataFrame:
     """
-    Load a dataframe from CSV/Parquet. This function is intentionally small
-    because schema enforcement is handled later by `enforce_schema`.
-
-    Notes
-    -----
-    * CSV is read with `low_memory=False` to avoid dtype guessing issues.
-    * Parquet is preferred for speed/memory when available.
+    Load a dataframe from CSV/Parquet. Schema enforcement is handled by
+    `enforce_schema` afterwards.
     """
     lower = path.lower()
     if lower.endswith(".parquet") or lower.endswith(".pq"):
         return pd.read_parquet(path)
-    # default: CSV (including .csv.gz)
     return pd.read_csv(path, low_memory=False)
 
 
@@ -40,73 +40,52 @@ def _load_dataframe(path: str) -> pd.DataFrame:
 @dataclass
 class QuickstartConfig:
     """
-    High-level configuration for a one-call run.
+    High-level configuration for a single-call run.
+
+    The model is **trained/imputed using the whole filtered network**.
+    The `stations` argument only restricts **which stations are evaluated/plot**.
 
     Parameters
     ----------
     data_path : str
-        Path to the input dataset (CSV or Parquet).
     target : str
-        Target variable (e.g., 'tmin', 'tmax', 'prec', 'evap').
     period : (str, str)
-        Inclusive date range in 'YYYY-MM-DD' format.
     stations : Iterable[str], optional
-        Subset of stations to *evaluate/plot*. The model is trained/imputed
-        using the whole filtered network; this field only restricts evaluation.
-        If None, all eligible stations are evaluated.
+        Only these stations are evaluated/plot. If None, evaluate all eligible.
     min_obs : int
-        Minimum valid observations of `target` per station to be included in
-        the training universe (and to be eligible for evaluation).
+        Minimum valid `target` obs per station to be in the training universe.
     k_neighbors : int
-        Number of spatial neighbors provided to the local model.
+        Number of spatial neighbors for the local model.
     n_estimators : int
-        Shortcut for Random Forest when `engine='rf'`.
+        RF shortcut (overridden by `model_params` if provided).
     model_params : dict, optional
-        Extra hyperparameters forwarded to the underlying model builder.
-        For RF you can pass {'n_estimators': 200, 'max_depth': 25,
-        'min_samples_leaf': 2}, etc. When provided, it overrides the shortcut.
+        Extra hyperparameters for the underlying model (e.g. RF).
     n_jobs : int
-        Parallelism used by the learner (if supported).
     random_state : int
-        Random seed for masking and stochastic learners.
     outputs_dir : str
-        Directory where artifacts (parquet/csv/plots) will be written.
     do_metrics : bool
-        If True, run per-station evaluation.
     train_frac : float
-        Fraction of observed rows in the *evaluated* station kept for training
-        (0.0 = strict LOSO, 1.0 = no simulated missing). Other stations are
-        never masked—so the model always trains on the full network.
-    do_mdr : bool
-        Reserved flag for future multi-density-ratio sweeps (not used here).
-    mdr_grid : Iterable[float], optional
-        Reserved grid for MDR sweeps (not used here).
+        For evaluated stations only: fraction kept for training. 0.0 = LOSO.
+    do_mdr, mdr_grid : reserved
     verbose : bool
-        Print progress information.
     plot_sample_stations : int
-        If >0, plot up to N evaluated stations.
     plots_dir : str
-        Subdirectory (inside outputs_dir) for plot images.
     title_tag : str
-        Optional suffix appended to plot titles.
     """
 
     data_path: str
     target: str
     period: Tuple[str, str]
 
-    stations: Optional[Iterable[str]] = None  # evaluate/plot subset
+    stations: Optional[Iterable[str]] = None
     min_obs: int = 60
     k_neighbors: int = 20
 
-    # RF shortcut (common case)
-    n_estimators: int = 200
-
+    n_estimators: int = 200  # RF shortcut
     model_params: Optional[Dict[str, Any]] = None
     n_jobs: int = -1
     random_state: int = 42
 
-    # outputs
     outputs_dir: str = "./outputs"
     do_metrics: bool = True
     train_frac: float = 0.7
@@ -120,15 +99,13 @@ class QuickstartConfig:
 
 # ------------------------------- Orchestrator ------------------------------- #
 def run_quickstart(**kwargs) -> dict:
-    """
-    Convenience wrapper: build `QuickstartConfig` from kwargs and execute.
-    """
+    """Build `QuickstartConfig` from kwargs and execute."""
     cfg = QuickstartConfig(**kwargs)
     return _run(cfg)
 
 
 def _run(cfg: QuickstartConfig) -> dict:
-    # 1) Load & enforce schema
+    # 1) Load & schema
     if cfg.verbose:
         print(f"Loading: {cfg.data_path}")
     df = _load_dataframe(cfg.data_path)
@@ -139,19 +116,18 @@ def _run(cfg: QuickstartConfig) -> dict:
     if cfg.verbose:
         print(f"Rows after period filter: {len(df):,} | stations: {df['station'].nunique():,}")
 
-    # 3) Outputs directory
+    # 3) Outputs dir
     os.makedirs(cfg.outputs_dir, exist_ok=True)
 
     # 4) Missing summary (diagnostics)
     miss_path = os.path.join(
-        cfg.outputs_dir,
-        f"missing_summary_{cfg.target}_{cfg.period[0][:4]}_{cfg.period[1][:4]}.csv",
+        cfg.outputs_dir, f"missing_summary_{cfg.target}_{cfg.period[0][:4]}_{cfg.period[1][:4]}.csv"
     )
     missing_summary(df, cfg.target).to_csv(miss_path, index=False)
     if cfg.verbose:
         print(f"Missing summary -> {miss_path}")
 
-    # 5) Select stations with at least `min_obs` target observations
+    # 5) Select training/evaluation universe
     df_sel = select_stations(df, target=cfg.target, min_obs=cfg.min_obs)
     if cfg.verbose:
         print(
@@ -165,7 +141,7 @@ def _run(cfg: QuickstartConfig) -> dict:
         engine="rf",
         target=cfg.target,
         k_neighbors=cfg.k_neighbors,
-        min_obs_per_station=0,  # allow strict LOSO for evaluated station
+        min_obs_per_station=0,  # allow strict LOSO on evaluated station
         n_jobs=cfg.n_jobs,
         random_state=cfg.random_state,
         model_params=rf_params,
@@ -174,7 +150,6 @@ def _run(cfg: QuickstartConfig) -> dict:
         print("Imputing with RF (global training, local neighbors) ...")
     df_imp = imp.fit_transform(df_sel)
 
-    # 7) Save imputed dataset
     imp_path = os.path.join(cfg.outputs_dir, "imputed.parquet")
     df_imp.to_parquet(imp_path, index=False)
 
@@ -189,16 +164,15 @@ def _run(cfg: QuickstartConfig) -> dict:
         print(f"Imputed parquet -> {imp_path}")
         print(f"Report: {report}")
 
-    # 8) Per-station evaluation ONLY for requested stations (or all)
+    # 7) Per-station evaluation (restricted to cfg.stations if provided)
     if cfg.do_metrics:
-        eval_ids = cfg.stations  # None => evaluate all eligible stations
         if cfg.verbose:
             print(f"Evaluating per-station with train_frac={cfg.train_frac} ...")
 
         metrics_df = evaluate_per_station(
-            df_full=df_sel,
+            df_full=df_sel,                # full network to train
             target=cfg.target,
-            station_ids=eval_ids,
+            station_ids=cfg.stations,      # only these are evaluated/masked
             train_frac=cfg.train_frac,
             min_obs=cfg.min_obs,
             engine="rf",
@@ -212,8 +186,8 @@ def _run(cfg: QuickstartConfig) -> dict:
         if cfg.verbose:
             print(f"Metrics per-station -> {metrics_path}")
 
-        # Optional plots
-        if cfg.plot_sample_stations and not metrics_df.empty:
+        # 8) Optional plots (only if viz is present)
+        if _HAS_VIZ and cfg.plot_sample_stations and not metrics_df.empty:
             plot_dir = os.path.join(cfg.outputs_dir, cfg.plots_dir)
             sample = metrics_df["station"].head(cfg.plot_sample_stations).tolist()
 
@@ -226,100 +200,11 @@ def _run(cfg: QuickstartConfig) -> dict:
                 title_suffix=cfg.title_tag,
             )
             plot_metrics_distribution(
-                metrics_df,
+                metrics_df=metrics_df,
                 out_dir=plot_dir,
                 title_suffix=cfg.title_tag,
             )
-
-    return report
-
-    if cfg.verbose:
-        print(f"Loading: {cfg.data_path}")
-    df = _load_dataframe(cfg.data_path)
-    df = enforce_schema(df, target=cfg.target)
-
-    # 1) Period filter
-    df = filter_period(df, cfg.period)
-    if cfg.verbose:
-        print(f"Rows after period filter: {len(df):,} | stations: {df['station'].nunique():,}")
-
-    os.makedirs(cfg.outputs_dir, exist_ok=True)
-
-    # 2) Missing summary (for diagnostics)
-    miss_path = os.path.join(
-        cfg.outputs_dir, f"missing_summary_{cfg.target}_{cfg.period[0][:4]}_{cfg.period[1][:4]}.csv"
-    )
-    missing_summary(df, cfg.target).to_csv(miss_path, index=False)
-    if cfg.verbose:
-        print(f"Missing summary -> {miss_path}")
-
-    # 3) Select stations that at least meet min_obs for the target
-    df_sel = select_stations(df, target=cfg.target, min_obs=cfg.min_obs)
-    if cfg.verbose:
-        print(f"Training universe: rows={len(df_sel):,} | stations={df_sel['station'].nunique():,}")
-
-    # 4) Fit+impute with the entire network
-    imp = MissClimateImputer(
-        engine="rf",
-        target=cfg.target,
-        k_neighbors=cfg.k_neighbors,
-        min_obs_per_station=0,
-        n_jobs=cfg.n_jobs,
-        random_state=cfg.random_state,
-        model_params=cfg.model_params or {"n_estimators": cfg.n_estimators},
-    )
-    if cfg.verbose:
-        print("Imputing with RF (global training, local neighbors) ...")
-    df_imp = imp.fit_transform(df_sel)
-
-    # 5) Save imputed dataframe (parquet to be memory-friendly)
-    imp_path = os.path.join(cfg.outputs_dir, "imputed.parquet")
-    df_imp.to_parquet(imp_path, index=False)
-    report = {
-        "target": cfg.target,
-        "rows": int(len(df_imp)),
-        "stations": int(df_imp["station"].nunique()),
-        "missing_after": int(df_imp[cfg.target].isna().sum()),
-        "missing_rate_after": float(df_imp[cfg.target].isna().mean()),
-    }
-    if cfg.verbose:
-        print(f"Imputed parquet -> {imp_path}")
-        print(f"Report: {report}")
-
-    # 6) Per-station evaluation ONLY for the user-selected stations (or all)
-    if cfg.do_metrics:
-        eval_ids = cfg.stations  # None means evaluate all
-        if cfg.verbose:
-            print(f"Evaluating per-station with train_frac={cfg.train_frac} ...")
-        metrics_df = evaluate_per_station(
-            df_full=df_sel,
-            target=cfg.target,
-            station_ids=eval_ids,
-            train_frac=cfg.train_frac,
-            min_obs=cfg.min_obs,
-            engine="rf",
-            k_neighbors=cfg.k_neighbors,
-            model_params=cfg.model_params or {"n_estimators": cfg.n_estimators},
-            random_state=cfg.random_state,
-            n_jobs=cfg.n_jobs,
-        )
-        metrics_path = os.path.join(cfg.outputs_dir, "metrics_per_station.csv")
-        metrics_df.to_csv(metrics_path, index=False)
-        if cfg.verbose:
-            print(f"Metrics per-station -> {metrics_path}")
-
-        # Optional plots
-        if cfg.plot_sample_stations and not metrics_df.empty:
-            sample = metrics_df["station"].head(cfg.plot_sample_stations).tolist()
-            plot_station_series(
-                df_raw=df_sel, df_imp=df_imp, target=cfg.target,
-                station_ids=sample,
-                out_dir=os.path.join(cfg.outputs_dir, cfg.plots_dir),
-                title_suffix=cfg.title_tag,
-            )
-            plot_metrics_distribution(
-                metrics_df, out_dir=os.path.join(cfg.outputs_dir, cfg.plots_dir),
-                title_suffix=cfg.title_tag,
-            )
+        elif cfg.verbose and not _HAS_VIZ:
+            print("Plots skipped (viz module not available in this build).")
 
     return report
