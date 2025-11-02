@@ -1,6 +1,7 @@
 # src/missclimatepy/requirements.py
 import pandas as pd
 import numpy as np
+from .masking import mask_station_fraction
 
 # Soportar ambas firmas (nombres) según la versión de impute.py
 try:
@@ -121,3 +122,4 @@ def mdr_curves(
             rep.update({"station": st, "train_frac": tf})
             rows.append(rep)
     return pd.DataFrame(rows)
+
