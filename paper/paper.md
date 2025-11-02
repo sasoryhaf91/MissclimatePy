@@ -1,41 +1,42 @@
 ---
-title: 'MissclimatePy: Local-only Imputation Framework for Climate Time Series (x, y, z + calendar only)'
+title: "MissclimatePy: A Minimal and Reproducible Local Framework for Imputing Climate Time Series Using Only Spatial and Temporal Predictors"
 tags:
   - Python
   - meteorology
   - climatology
-  - reproducibility
+  - reproducible research
   - missing data
   - machine learning
 authors:
   - name: "Hugo Antonio-Fernández"
-    affiliation: 1
+    orcid: "0000-0002-5355-8476"
+    affiliation: "1, 2"
   - name: "Humberto Vaquera-Huerta"
-    affiliation: 2
+    orcid: "0000-0002-2805-804X"
+    affiliation: 1
   - name: "Moisés Michel Rosengaus-Moshinsky"
     affiliation: 3
   - name: "Paulino Pérez-Rodríguez"
-    affiliation: 4
+    orcid: "0000-0002-3202-1784"
+    affiliation: 1
   - name: "José Crossa"
-    affiliation: 5
+    orcid: "0000-0001-9429-5855"
+    affiliation: 4
 affiliations:
-  - name: "Affiliation TBA (1)"
+  - name: "Colegio de Postgraduados, México"
     index: 1
-  - name: "Affiliation TBA (2)"
+  - name: "Universidad Mexiquense del Bicentenario, México"
     index: 2
-  - name: "Affiliation TBA (3)"
+  - name: "Independent Consultant"
     index: 3
-  - name: "Affiliation TBA (4)"
+  - name: "CIMMYT, México"
     index: 4
-  - name: "Affiliation TBA (5)"
-    index: 5
 date: 2025-11-01
 bibliography: paper.bib
 ---
 
 # Summary
-**MissclimatePy** is a lightweight, reproducible Python package that performs missing-data imputation in climate
-station time series using only spatial and temporal predictors: latitude, longitude, elevation, and calendar features.
+**MissclimatePy** is a minimal and reproducible framework for climate data imputation using only spatial coordinates (x, y, z) and calendar features (t).
 It eliminates dependency on external covariates, gridded data, or auxiliary variables—focusing instead on the
 spatio-temporal structure inherent in the observation network.
 

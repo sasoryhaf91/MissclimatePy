@@ -1,8 +1,7 @@
 
 # MissclimatePy
 
-**Missing-Data Imputation for Climate Time Series (x, y, z + calendar only)**  
-*A reproducible framework for local station imputation based on spatial and temporal features only.*
+**Minimal and reproducible framework for climate data imputation using only spatial coordinates (x, y, z) and calendar features (t).**
 
 [![CI](https://github.com/sasoryhaf91/MissclimatePy/actions/workflows/ci.yml/badge.svg)](https://github.com/sasoryhaf91/MissclimatePy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
