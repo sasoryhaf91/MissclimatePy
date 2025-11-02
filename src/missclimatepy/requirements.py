@@ -1,8 +1,14 @@
-from __future__ import annotations
+# src/missclimatepy/requirements.py
 import pandas as pd
 import numpy as np
+
+# Soportar ambas firmas (nombres) según la versión de impute.py
+try:
+    from .impute import impute_local_station  # versiones antiguas
+except ImportError:
+    from .impute import fit_transform_local_rf as impute_local_station  # versión nueva
+
 from .masking import mask_station_fraction
-from .impute import impute_local_station
 from .metrics import regression_report
 
 def _meets(metrics: dict, thresholds: dict):
