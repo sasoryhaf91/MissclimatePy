@@ -1,36 +1,41 @@
+# src/missclimatepy/mdr.py
 from __future__ import annotations
+import numpy as np
 import pandas as pd
-from typing import Iterable, Dict
+from typing import Iterable, Optional, Dict, Any, Tuple
 from .evaluate import evaluate_per_station
 
-def mdr_grid_search(
-    df: pd.DataFrame, target: str,
-    missing_fracs: Iterable[float],         # e.g. [0.1, 0.3]
-    grid_K: Iterable[int],                  # e.g. [5, 8, 12]
-    grid_min_obs: Iterable[int],            # e.g. [30, 60, 120]
-    grid_trees: Iterable[int],              # e.g. [200, 300]
-    metric_thresholds: Dict[str, float] = {"RMSE": 2.0, "R2": 0.4},
-    random_state: int = 42,
-):
+def inclusion_sweep(df: pd.DataFrame, target: str,
+                    include_pcts: Iterable[float]=(0.0,0.04,0.1,0.2,0.4,0.6,0.8),
+                    period: Optional[Tuple[str,str]]=None,
+                    stations: Optional[Iterable[str]]=None,
+                    min_obs: int=60, engine: str="rf",
+                    model_params: Optional[Dict[str,Any]]=None) -> pd.DataFrame:
+    sub = df.copy()
+    if period is not None:
+        d0, d1 = period
+        sub = sub[(sub["date"]>=d0) & (sub["date"]<=d1)]
+    if stations is not None:
+        S = set(map(str, stations))
+        sub = sub[sub["station"].astype(str).isin(S)]
+
     rows = []
-    for miss in missing_fracs:
-        train_frac = 1.0 - float(miss)
-        for K in grid_K:
-            for mobs in grid_min_obs:
-                for trees in grid_trees:
-                    res = evaluate_per_station(
-                        df_src=df, target=target,
-                        train_frac=train_frac, min_obs=mobs,
-                        k_neighbors=K, n_estimators=trees,
-                        random_state=random_state,
-                    )
-                    total = int(len(res))
-                    passed = int(((res["RMSE"] <= metric_thresholds.get("RMSE", 1e9)) &
-                                  (res["R2"]   >= metric_thresholds.get("R2", -1e9))).sum()) if total else 0
-                    rows.append({
-                        "missing_frac": miss, "train_frac": train_frac,
-                        "k_neighbors": K, "min_obs": mobs, "n_estimators": trees,
-                        "stations_evaluated": total, "stations_passed": passed,
-                        "pass_rate": (passed/total) if total else 0.0
-                    })
-    return pd.DataFrame(rows).sort_values(["missing_frac","pass_rate"], ascending=[True, False])
+    for p in include_pcts:
+        metr = evaluate_per_station(sub, target, train_frac=float(p),
+                                    min_obs=min_obs, engine=engine,
+                                    model_params=model_params)
+        metr["include_pct"] = float(p)
+        rows.append(metr)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+def recommend_min_inclusion(sweep_df: pd.DataFrame,
+                            thresholds: dict={"R2":0.5,"RMSE":2.0}) -> pd.DataFrame:
+    out = []
+    for st, g in sweep_df.groupby("station"):
+        gg = g.sort_values("include_pct").reset_index(drop=True)
+        ok = np.ones(len(gg), dtype=bool)
+        if "R2" in thresholds:   ok &= (gg["R2"] >= thresholds["R2"])
+        if "RMSE" in thresholds: ok &= (gg["RMSE"] <= thresholds["RMSE"])
+        out.append({"station": st,
+                    "min_include_pct": float(gg.loc[ok,"include_pct"].min()) if ok.any() else np.nan})
+    return pd.DataFrame(out)
