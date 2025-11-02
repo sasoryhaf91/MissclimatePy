@@ -34,8 +34,10 @@ def recommend_min_inclusion(sweep_df: pd.DataFrame,
     for st, g in sweep_df.groupby("station"):
         gg = g.sort_values("include_pct").reset_index(drop=True)
         ok = np.ones(len(gg), dtype=bool)
-        if "R2" in thresholds:   ok &= (gg["R2"] >= thresholds["R2"])
-        if "RMSE" in thresholds: ok &= (gg["RMSE"] <= thresholds["RMSE"])
+        if "R2" in thresholds:   
+            ok &= (gg["R2"] >= thresholds["R2"])
+        if "RMSE" in thresholds: 
+            ok &= (gg["RMSE"] <= thresholds["RMSE"])
         out.append({"station": st,
                     "min_include_pct": float(gg.loc[ok,"include_pct"].min()) if ok.any() else np.nan})
     return pd.DataFrame(out)
