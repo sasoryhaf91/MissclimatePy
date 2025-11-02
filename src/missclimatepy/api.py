@@ -120,9 +120,15 @@ class MissClimateImputer:
         # Add in-sample metrics if training data is available
         if self._X_train is not None and self._y_train is not None and len(self._y_train) > 0:
             yhat = self._model.predict(self._X_train)
+            # MAE y R2 con sklearn (compatibles)
+            mae = mean_absolute_error(self._y_train, yhat)
+            r2 = r2_score(self._y_train, yhat)
+            # RMSE manual (compatibilidad con versiones sin squared=)
+            diff = self._y_train - yhat
+            rmse = float(np.sqrt(np.mean(diff * diff)))
             rep.update({
-                "MAE": float(mean_absolute_error(self._y_train, yhat)),
-                "RMSE": float(mean_squared_error(self._y_train, yhat, squared=False)),
-                "R2": float(r2_score(self._y_train, yhat)),
+                "MAE": float(mae),
+                "RMSE": rmse,
+                "R2": float(r2),
             })
         return rep
