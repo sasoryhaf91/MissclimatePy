@@ -15,7 +15,7 @@ __all__ = [
     "evaluate_per_station",
     "mdr_grid_search",
     "plot_station_series", "plot_metrics_distribution",
-]]
+]
 
 __version__ = "0.1.0"
 
