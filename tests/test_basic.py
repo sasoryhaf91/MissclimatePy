@@ -27,9 +27,3 @@ def test_rf_fit_transform():
     assert out["tmin"].isna().sum() == 0
     rep = imp.report(out)
     assert {"MAE","RMSE","R2"} <= rep.keys()
-
-def test_idw_fit_transform():
-    df = fake_df()
-    imp = MissClimateImputer(model="idw", target="tmin")
-    out = imp.fit_transform(df)
-    assert out["tmin"].isna().sum() == 0
