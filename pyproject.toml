@@ -1,47 +1,60 @@
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "missclimatepy"
 version = "0.1.0"
-description = "Missing-Data Imputation for Climate Time Series (x, y, z + calendar only)"
+description = "Minimal and reproducible local framework for imputing climate time series using only spatial (x,y,z) and calendar (t) features."
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.9"
-license = {text = "MIT"}
-authors = [{name = "Your Name", email = "you@example.com"}]
-keywords = ["climate", "imputation", "meteorology", "random-forest", "idw", "time-series"]
+authors = [
+  { name = "Hugo Antonio-Fernández", email = "uiem.haf@gmail.com" }
+]
+keywords = ["climate", "imputation", "meteorology", "spatio-temporal", "random-forest"]
 
 dependencies = [
-  "pandas>=2.0",
-  "numpy>=1.24",
-  "scikit-learn>=1.3",
-]
-classifiers = [
-  "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
-  "Topic :: Scientific/Engineering :: Atmospheric Science",
+  "numpy>=1.22",
+  "pandas>=1.5",
+  "scikit-learn>=1.0",
+  "matplotlib>=3.5",
+  "tqdm>=4.60"
 ]
 
 [project.urls]
-Homepage = "https://github.com/youruser/missclimatepy"
-Documentation = "https://youruser.github.io/missclimatepy"
-Issues = "https://github.com/youruser/missclimatepy/issues"
+Homepage = "https://github.com/sasoryhaf91/MissclimatePy"
+Repository = "https://github.com/sasoryhaf91/MissclimatePy"
+Issues = "https://github.com/sasoryhaf91/MissclimatePy/issues"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "pytest-cov>=4",
+  "black>=24.0",
+  "ruff>=0.6",
+  "build>=1.2",
+  "twine>=5.0",
+  "mkdocs>=1.5",
+  "mkdocs-material>=9.5"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["missclimatepy*"]
 
-[project.optional-dependencies]
-parquet = ["pyarrow>=15"]
-dev = ["pytest>=7", 
-  "coverage>=7", 
-  "pre-commit>=3", 
-  "mkdocs>=1.5", 
-  "mkdocs-material>=9.5", 
-  "pyarrow>=15"
-  "pytest-cov",
-  "black",
-  "ruff",
-  "matplotlib>=3.5",]
-]
+# Si quieres incluir data adicional en el paquete en el futuro:
+# [tool.setuptools.package-data]
+# "missclimatepy" = ["py.typed"]
+
+[tool.coverage.run]
+branch = true
+source = ["missclimatepy"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
