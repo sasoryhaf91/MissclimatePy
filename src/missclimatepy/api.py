@@ -1,134 +1,158 @@
 # src/missclimatepy/api.py
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+
+from dataclasses import dataclass
+from typing import Dict, Any, Optional
+
 import numpy as np
 import pandas as pd
-from .models import build_model
-from sklearn.metrics import mean_absolute_error, r2_score
 
-def _calendar_features(dates: pd.Series) -> pd.DataFrame:
-    d = pd.to_datetime(dates)
-    doy = d.dt.dayofyear.astype(int)
-    year = d.dt.year.astype(int)
-    month = d.dt.month.astype(int)
-    sin1 = np.sin(2 * np.pi * doy / 365.25)
-    cos1 = np.cos(2 * np.pi * doy / 365.25)
-    return pd.DataFrame({"year": year, "month": month, "doy": doy, "sin1": sin1, "cos1": cos1})
+from .models import build_model
+
 
 @dataclass
+class _FitState:
+    X_train: Optional[np.ndarray] = None
+    y_train: Optional[np.ndarray] = None
+    model: Any = None
+
+
 class MissClimateImputer:
     """
-    Local spatio-temporal imputer using only (x, y, z + calendar) features.
-    Model-agnostic via registry (default: 'rf').
+    High-level imputer that trains a global model with spatio-temporal features
+    (t, x, y, z) and then predicts missing target values.
 
-    Back-compat:
-    - Accepts `model="rf"` as alias of `engine`.
-    - Accepts top-level RF params: `n_estimators`, `n_jobs`, `random_state`.
-    - Accepts `rf_params={...}` and merges with `model_params`.
+    Parameters
+    ----------
+    engine : str, default="rf"
+        Model name (e.g., "rf").
+    target : str, default="tmin"
+        Target column to impute.
+    k_neighbors : int, default=20
+        Number of neighbors for neighbor-based features (pipeline-level; not a model arg).
+    min_obs_per_station : int, default=50
+        Minimum number of valid target rows per station to include in training.
+    n_jobs : int, default=-1
+        Parallelism for model training/prediction (passed to the estimator when applicable).
+    random_state : int, default=42
+        Random seed for reproducibility.
+    rf_params : dict, optional
+        Random Forest overrides.
+    model_params : dict, optional
+        Generic model overrides (merged on top of rf_params).
     """
-    # Current API
-    engine: str = "rf"
-    target: str = "tmin"
-    k_neighbors: int = 12
-    min_obs_per_station: int = 0
-    model_params: Optional[Dict[str, Any]] = None
 
-    # ---- Back-compat/legacy parameters ----
-    model: Optional[str] = None  # alias for engine
-    n_estimators: Optional[int] = None
-    n_jobs: Optional[int] = None
-    random_state: Optional[int] = None
-    rf_params: Optional[Dict[str, Any]] = None
-    # ---------------------------------------
+    def __init__(
+        self,
+        engine: str = "rf",
+        target: str = "tmin",
+        k_neighbors: int = 20,
+        min_obs_per_station: int = 50,
+        n_jobs: int = -1,
+        random_state: int = 42,
+        rf_params: Optional[Dict[str, Any]] = None,
+        model_params: Optional[Dict[str, Any]] = None,
+    ):
+        self.engine = engine
+        self.target = target
 
-    _model: Any = field(default=None, init=False)
-    _fitted: bool = field(default=False, init=False)
-    _resolved_params: Dict[str, Any] = field(default_factory=dict, init=False)
+        # Pipeline-level knobs (NO se pasan al modelo)
+        self.k_neighbors = int(k_neighbors)
+        self.min_obs_per_station = int(min_obs_per_station)
 
-    # store training data to enable in-sample metrics in report()
-    _X_train: Optional[np.ndarray] = field(default=None, init=False)
-    _y_train: Optional[np.ndarray] = field(default=None, init=False)
+        # Modelo / ejecución
+        self.n_jobs = n_jobs
+        self.random_state = random_state
 
-    def __post_init__(self):
-        # Map legacy 'model' → 'engine'
-        if self.model is not None:
-            self.engine = self.model
+        # Hyperparams (se fusionan y luego se filtran)
+        self._rf_params = rf_params or {}
+        self._model_params = model_params or {}
 
-        # Merge parameters in priority order (top-level wins)
-        params: Dict[str, Any] = {}
-        if self.model_params:
-            params.update(self.model_params)
-        if self.rf_params:
-            params.update(self.rf_params)
-        if self.n_estimators is not None:
-            params["n_estimators"] = self.n_estimators
-        if self.n_jobs is not None:
-            params["n_jobs"] = self.n_jobs
-        if self.random_state is not None:
-            params["random_state"] = self.random_state
-        self._resolved_params = params
+        # Estado de entrenamiento
+        self._state = _FitState()
 
-    @staticmethod
-    def make_features(df: pd.DataFrame) -> pd.DataFrame:
-        cal = _calendar_features(df["date"])
-        return pd.concat(
-            [
-                df[["latitude", "longitude", "elevation"]].reset_index(drop=True),
-                cal.reset_index(drop=True),
-            ],
-            axis=1,
+    # ----------------------------------------------------------------------
+    # Feature builder simple (placeholder; aquí irán t, x, y, z y lo que
+    # uses con vecinos cuando lo cableemos).
+    def make_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = pd.DataFrame(
+            {
+                "lat": pd.to_numeric(df["latitude"], errors="coerce"),
+                "lon": pd.to_numeric(df["longitude"], errors="coerce"),
+                "elev": pd.to_numeric(df["elevation"], errors="coerce"),
+                "doy": pd.to_datetime(df["date"], errors="coerce").dt.dayofyear.astype("Int64"),
+                "year": pd.to_datetime(df["date"], errors="coerce").dt.year.astype("Int64"),
+            },
+            index=df.index,
         )
+        # Codificación sen/cos opcional para estacionalidad
+        with np.errstate(invalid="ignore"):
+            out["sin_doy"] = np.sin(2 * np.pi * out["doy"] / 366.0)
+            out["cos_doy"] = np.cos(2 * np.pi * out["doy"] / 366.0)
+        return out
 
+    # ----------------------------------------------------------------------
+    def _resolve_model_params(self) -> Dict[str, Any]:
+        """
+        Merge rf_params and model_params, drop pipeline-only keys and None values.
+        """
+        params: Dict[str, Any] = {}
+        params.update(self._rf_params)
+        params.update(self._model_params)
+
+        # No enviar knobs del pipeline al estimador
+        EXCLUDE = {"k_neighbors", "min_obs_per_station"}
+
+        cleaned = {k: v for k, v in params.items() if v is not None and k not in EXCLUDE}
+
+        # Pasar n_jobs/random_state cuando el modelo los soporte (RF los soporta)
+        cleaned.setdefault("n_jobs", self.n_jobs)
+        cleaned.setdefault("random_state", self.random_state)
+        return cleaned
+
+    # ----------------------------------------------------------------------
     def fit(self, df: pd.DataFrame) -> "MissClimateImputer":
-        if self.target not in df.columns:
-            raise ValueError(f"Target '{self.target}' not found.")
-        obs = df[df[self.target].notna()].copy()
-        if len(obs) == 0:
-            raise ValueError("No observed rows to fit. Provide neighbors with observations.")
+        # Filtrar filas con target observado
+        obs = df[df[self.target].notna()]
+        # Exigir mínimo de observaciones por estación
+        if self.min_obs_per_station > 0:
+            counts = obs.groupby("station")[self.target].count()
+            keep = counts[counts >= self.min_obs_per_station].index
+            obs = obs[obs["station"].isin(keep)]
+
         X = self.make_features(obs).to_numpy()
-        y = obs[self.target].to_numpy()
-        self._model = build_model(self.engine, **self._resolved_params)
-        self._model.fit(X, y)
-        self._X_train, self._y_train = X, y  # keep for in-sample metrics
-        self._fitted = True
+        y = pd.to_numeric(obs[self.target], errors="coerce").to_numpy()
+
+        params = self._resolve_model_params()
+        self._state.model = build_model(self.engine, **params)
+        self._state.model.fit(X, y)
+
+        self._state.X_train, self._state.y_train = X, y
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        if not self._fitted or self._model is None:
-            raise RuntimeError("Model is not fitted. Call fit() first.")
+        if self._state.model is None:
+            raise RuntimeError("Model is not fitted. Call .fit() first.")
         out = df.copy()
+        X_all = self.make_features(out).to_numpy()
+        yhat = self._state.model.predict(X_all)
+        # Imputa solo valores faltantes del target
         mask = out[self.target].isna()
-        if mask.any():
-            Xmiss = self.make_features(out.loc[mask]).to_numpy()
-            out.loc[mask, self.target] = self._model.predict(Xmiss)
+        out.loc[mask, self.target] = yhat[mask]
         return out
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
 
     def report(self, df_after: pd.DataFrame) -> dict:
-        miss = int(df_after[self.target].isna().sum())
+        # Reporte mínimo post-imputación
+        miss_after = int(df_after[self.target].isna().sum())
         rows = int(len(df_after))
-        rep = {
+        stations = int(df_after["station"].nunique())
+        return {
             "target": self.target,
             "rows": rows,
-            "stations": int(df_after["station"].nunique()) if "station" in df_after.columns else None,
-            "missing_after": miss,
-            "missing_rate_after": float(miss / rows if rows else 0.0),
+            "stations": stations,
+            "missing_after": miss_after,
+            "missing_rate_after": (miss_after / rows) if rows else 0.0,
         }
-        # Add in-sample metrics if training data is available
-        if self._X_train is not None and self._y_train is not None and len(self._y_train) > 0:
-            yhat = self._model.predict(self._X_train)
-            # MAE y R2 con sklearn (compatibles)
-            mae = mean_absolute_error(self._y_train, yhat)
-            r2 = r2_score(self._y_train, yhat)
-            # RMSE manual (compatibilidad con versiones sin squared=)
-            diff = self._y_train - yhat
-            rmse = float(np.sqrt(np.mean(diff * diff)))
-            rep.update({
-                "MAE": float(mae),
-                "RMSE": rmse,
-                "R2": float(r2),
-            })
-        return rep
