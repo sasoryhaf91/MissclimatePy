@@ -5,6 +5,7 @@ from .prepare import enforce_schema, filter_period, missing_summary, select_stat
 from .neighbors import neighbor_distances
 from .evaluate import evaluate_per_station
 from .mdr import mdr_grid_search
+from .viz import plot_station_series, plot_metrics_distribution
 
 __all__ = [
     "MissClimateImputer",
@@ -13,6 +14,11 @@ __all__ = [
     "neighbor_distances",
     "evaluate_per_station",
     "mdr_grid_search",
-]
+    "plot_station_series", "plot_metrics_distribution",
+]]
 
 __version__ = "0.1.0"
+
+
+
+
