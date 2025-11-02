@@ -1,20 +1,28 @@
-
+# src/missclimatepy/models/rf.py
 from __future__ import annotations
-import numpy as np
-from sklearn.ensemble import RandomForestRegressor as SKRF
+from typing import Any, Optional
+from sklearn.ensemble import RandomForestRegressor
 
-class RFRegressor:
-    def __init__(self, n_estimators=200, max_depth=None, n_jobs=-1, random_state=42):
-        self.model = SKRF(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            n_jobs=n_jobs,
-            random_state=random_state
-        )
-
-    def fit(self, X: np.ndarray, y: np.ndarray):
-        self.model.fit(X, y)
-        return self
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return self.model.predict(X)
+def build_rf(
+    n_estimators: int = 300,
+    random_state: int = 42,
+    n_jobs: int = -1,
+    max_depth: Optional[int] = None,
+    min_samples_split: int = 2,
+    min_samples_leaf: int = 1,
+    max_features: str = "sqrt",
+    bootstrap: bool = True,
+    **kwargs: Any,
+) -> RandomForestRegressor:
+    params = dict(
+        n_estimators=n_estimators,
+        random_state=random_state,
+        n_jobs=n_jobs,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        max_features=max_features,
+        bootstrap=bootstrap,
+    )
+    params.update(kwargs)  # allow extra overrides
+    return RandomForestRegressor(**params)
