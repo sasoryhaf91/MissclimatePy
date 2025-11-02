@@ -1,116 +1,94 @@
-from __future__ import annotations
+# src/missclimatepy/api.py
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 import pandas as pd
-from dataclasses import dataclass, field
-from .impute import impute_local_station
+
+from .impute import fit_transform_local_rf
+
 
 @dataclass
 class MissClimateImputer:
-    # Backward-compat: accept both names; map 'model' -> 'engine'
-    engine: str = "rf"
-    model: str | None = None
+    """
+    Public API for MissclimatePy.
 
+    Parameters
+    ----------
+    engine : {"rf"}
+        Imputation engine. Currently only "rf" (local Random Forest).
+    target : str
+        Target variable column to impute (e.g., "tmin", "tmax", "prec", "evap").
+    k_neighbors : int
+        Number of spatio-temporal neighbors used to train the local model.
+        (If your neighbor selection is purely spatial, it still applies here.)
+    min_obs_per_station : int
+        Minimum number of valid observations required to train the local model.
+    n_estimators : int
+        Number of trees for RandomForestRegressor.
+    n_jobs : int
+        Parallel jobs for RandomForestRegressor.
+    random_state : int
+        Seed for reproducibility.
+    rf_params : dict | None
+        Optional hyperparameters forwarded directly to RandomForestRegressor,
+        e.g. {"max_depth": 20, "min_samples_leaf": 2}.
+    """
+    engine: str = "rf"
     target: str = "tmin"
-    k_neighbors: int | None = 15
-    radius_km: float | None = None
-    # DEFAULT LOWERED to avoid empty-train on tiny tests
-    min_obs_per_station: int = 1
+    k_neighbors: int = 8
+    min_obs_per_station: int = 60
     n_estimators: int = 300
     n_jobs: int = -1
     random_state: int = 42
+    rf_params: Optional[Dict[str, Any]] = None
 
-    _fitted: bool = field(init=False, default=False)
+    _fitted: bool = False
 
-    def __post_init__(self):
-        # Map legacy 'model' to 'engine'
-        if self.model is not None:
-            self.engine = self.model
-        # Accept 'idw' but map it to RF for compatibility (no IDW in this package)
-        if self.engine == "idw":
-            self.engine = "rf"
-        # Validate
+    def fit(self, df: pd.DataFrame):
         if self.engine not in {"rf"}:
             raise ValueError(f"Unsupported engine '{self.engine}'. Supported: 'rf'.")
 
-    def fit(self, df: pd.DataFrame):
-        req = {"station","date","latitude","longitude","elevation", self.target}
-        missing = req - set(df.columns)
+        # basic column validation
+        required = ["station", "date", "latitude", "longitude", "elevation", self.target]
+        missing = [c for c in required if c not in df.columns]
         if missing:
-            raise ValueError(f"Missing columns: {sorted(missing)}")
+            raise ValueError(f"Missing required columns: {missing}")
+
         self._fitted = True
         return self
 
-    def impute_station(self, df_all: pd.DataFrame, target_station: str, train_frac: float = 1.0) -> pd.DataFrame:
-        if not self._fitted:
-            raise RuntimeError("Call fit() before impute_station()")
-        out, _ = impute_local_station(
-            df_all=df_all,
-            target_station=target_station,
-            target_var=self.target,
-            k_neighbors=self.k_neighbors,
-            radius_km=self.radius_km,
-            min_obs_per_station=self.min_obs_per_station,
-            train_frac=train_frac,
-            n_estimators=self.n_estimators,
-            n_jobs=self.n_jobs,
-            random_state=self.random_state,
-        )
-        return out
-
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        outs = []
-        for st in df["station"].unique():
-            st_out = self.impute_station(df_all=df, target_station=st, train_frac=1.0)
-            outs.append(st_out if st_out is not None else df[df.station==st].copy())
-        return pd.concat(outs, ignore_index=True)
+        if not self._fitted:
+            raise RuntimeError("Call .fit(df) before .transform(df).")
+
+        if self.engine == "rf":
+            return fit_transform_local_rf(
+                df=df,
+                target=self.target,
+                k_neighbors=self.k_neighbors,
+                min_obs_per_station=self.min_obs_per_station,
+                n_estimators=self.n_estimators,
+                n_jobs=self.n_jobs,
+                random_state=self.random_state,
+                rf_params=self.rf_params,  # <- new
+            )
+
+        raise RuntimeError("Unexpected engine state.")
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
 
-    def report(self, df: pd.DataFrame) -> dict:
+    def report(self, df_valid: pd.DataFrame) -> dict:
         """
         Minimal report after imputation.
-        - Always returns MAE, RMSE, R2 keys (compatible with tests).
-        - If a '<target>_true' column exists, compute metrics against it.
-          Otherwise, return metrics as 0.0 placeholders.
         """
-        if "station" not in df.columns or self.target not in df.columns:
-            raise ValueError("DataFrame must contain 'station' and target column.")
-
-        total = int(df[self.target].shape[0])
-        n_nans = int(df[self.target].isna().sum())
-
-        rep = {
+        rows = len(df_valid)
+        stations = df_valid["station"].nunique()
+        miss_after = df_valid[self.target].isna().sum()
+        miss_rate = float(miss_after) / float(rows) if rows else 0.0
+        return {
             "target": self.target,
-            "rows": total,
-            "stations": int(df["station"].nunique()),
-            "missing_after": n_nans,
-            "missing_rate_after": float(n_nans / total) if total else 0.0,
+            "rows": rows,
+            "stations": stations,
+            "missing_after": int(miss_after),
+            "missing_rate_after": miss_rate,
         }
-
-        # Metrics block (compatible with tests)
-        true_col = f"{self.target}_true"
-        if true_col in df.columns:
-            # compute on rows where both y_true and y_pred are available
-            msk = df[true_col].notna() & df[self.target].notna()
-            if msk.any():
-                y_true = df.loc[msk, true_col].to_numpy()
-                y_pred = df.loc[msk, self.target].to_numpy()
-                # MAE
-                mae = float((abs(y_true - y_pred)).mean())
-                # RMSE
-                rmse = float(((y_true - y_pred) ** 2).mean() ** 0.5)
-                # R2 (simple)
-                ss_res = float(((y_true - y_pred) ** 2).sum())
-                ss_tot = float(((y_true - y_true.mean()) ** 2).sum())
-                r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-            else:
-                mae = rmse = 0.0
-                r2 = 0.0
-        else:
-            # No ground-truth available; return placeholders (keeps API/tests happy)
-            mae = rmse = 0.0
-            r2 = 0.0
-
-        rep.update({"MAE": mae, "RMSE": rmse, "R2": r2})
-        return rep
-    
