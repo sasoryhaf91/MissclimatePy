@@ -1,14 +1,44 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
-title: "MissclimatePy: Missing-Data Imputation for Climate Time Series (x, y, z + calendar only)"
+title: "MissclimatePy: A Minimal and Reproducible Local Framework for Imputing Climate Time Series Using Only Spatial and Temporal Predictors"
 version: "0.1.0"
 date-released: "2025-11-01"
-doi: "10.5281/zenodo.TBA"
-authors:
-- name: Hugo Antonio-Fernández
-- name: Humberto Vaquera-Huerta
-- name: Moisés Michel Rosengaus-Moshinsky
-- name: Paulino Pérez-Rodríguez
-- name: José Crossa
+doi: "10.5281/zenodo.TBA"   
 repository-code: "https://github.com/sasoryhaf91/MissclimatePy"
 license: "MIT"
+
+authors:
+  - name: "Hugo Antonio-Fernández"
+    orcid: "https://orcid.org/0000-0002-5355-8476"
+    affiliation: "Colegio de Postgraduados, Mexico; Universidad Mexiquense del Bicentenario, Mexico"
+  - name: "Humberto Vaquera-Huerta"
+    orcid: "https://orcid.org/0000-0002-2805-804X"
+    affiliation: "Colegio de Postgraduados, Mexico"
+  - name: "Moisés Michel Rosengaus-Moshinsky"
+    affiliation: "Independent Consultant"
+  - name: "Paulino Pérez-Rodríguez"
+    orcid: "https://orcid.org/0000-0002-3202-1784"
+    affiliation: "Colegio de Postgraduados, Mexico"
+  - name: "José Crossa"
+    orcid: "https://orcid.org/0000-0001-9429-5855"
+    affiliation: "CIMMYT, Mexico"
+
+keywords:
+  - climate
+  - imputation
+  - missing data
+  - reproducibility
+  - machine learning
+  - Python
+
+preferred-citation:
+  type: article
+  title: "MissclimatePy: A Minimal and Reproducible Local Framework for Imputing Climate Time Series Using Only Spatial and Temporal Predictors"
+  authors:
+    - name: "Hugo Antonio-Fernández"
+    - name: "Humberto Vaquera-Huerta"
+    - name: "Moisés Michel Rosengaus-Moshinsky"
+    - name: "Paulino Pérez-Rodríguez"
+    - name: "José Crossa"
+  year: 2025
+  doi: "10.5281/zenodo.TBA"  
