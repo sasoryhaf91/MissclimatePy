@@ -112,9 +112,11 @@ def _run(cfg: QuickstartConfig) -> dict:
     df = enforce_schema(df, target=cfg.target)
 
     # 2) Period filter
-    df = filter_period(df, cfg.period)
+    # filter_period(df, start, end) → desempaqueta la tupla (start, end)
+    df = filter_period(df, *cfg.period)
     if cfg.verbose:
         print(f"Rows after period filter: {len(df):,} | stations: {df['station'].nunique():,}")
+
 
     # 3) Outputs dir
     os.makedirs(cfg.outputs_dir, exist_ok=True)
