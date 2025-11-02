@@ -12,6 +12,7 @@ requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [{name = "Your Name", email = "you@example.com"}]
 keywords = ["climate", "imputation", "meteorology", "random-forest", "idw", "time-series"]
+
 dependencies = [
   "pandas>=2.0",
   "numpy>=1.24",
@@ -33,4 +34,14 @@ where = ["src"]
 
 [project.optional-dependencies]
 parquet = ["pyarrow>=15"]
-dev = ["pytest>=7", "coverage>=7", "pre-commit>=3", "mkdocs>=1.5", "mkdocs-material>=9.5", "pyarrow>=15"]
+dev = ["pytest>=7", 
+  "coverage>=7", 
+  "pre-commit>=3", 
+  "mkdocs>=1.5", 
+  "mkdocs-material>=9.5", 
+  "pyarrow>=15"
+  "pytest-cov",
+  "black",
+  "ruff",
+  "matplotlib>=3.5",]
+]
