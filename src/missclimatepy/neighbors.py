@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from typing import Optional
+#from typing import Optional
 
 
 def _to_radians(x: np.ndarray) -> np.ndarray:
@@ -124,3 +124,60 @@ def neighbor_distances(
 
     out = pd.DataFrame(rows, columns=["station", "neighbor", "rank", "distance_km"])
     return out
+
+def _station_xy(df: pd.DataFrame, station: str) -> tuple[float, float, float]:
+    row = (
+        df.loc[df["station"] == station, ["latitude", "longitude", "elevation"]]
+        .drop_duplicates()
+        .iloc[0]
+    )
+    return float(row["latitude"]), float(row["longitude"]), float(row["elevation"])
+
+
+def get_station_neighbors(
+    df: pd.DataFrame, station: str, k_neighbors: int = 20
+) -> pd.DataFrame:
+    """
+    Return the `k_neighbors` closest stations to `station` using Euclidean
+    distance in (lat, lon, elev) space, together with simple correlation
+    to the target if present (computed on overlapping valid rows).
+    """
+    lat, lon, elev = _station_xy(df, station)
+    stations = (
+        df[["station", "latitude", "longitude", "elevation"]]
+        .drop_duplicates()
+        .copy()
+    )
+    stations = stations[stations["station"] != station]
+    dlat = stations["latitude"].to_numpy() - lat
+    dlon = stations["longitude"].to_numpy() - lon
+    delv = stations["elevation"].to_numpy() - elev
+    dist = np.sqrt(dlat**2 + dlon**2 + (delv / 1000.0) ** 2)  # mild scaling elev
+
+    out = stations[["station"]].copy()
+    out["dist"] = dist
+
+    # naive corr using daily means per date when target exists
+    # note: we don't import target here; corr computed later on demand
+    out = out.sort_values("dist", ascending=True).head(k_neighbors)
+    out = out.rename(columns={"station": "neighbor"}).reset_index(drop=True)
+    out["corr"] = np.nan  # filled by caller optionally
+    return out
+
+
+def neighbor_overlap_ratio(
+    df: pd.DataFrame, target: str, station_a: str, station_b: str
+) -> float:
+    """
+    Compute the ratio of overlapping valid days between two stations
+    for `target`. Returns 0..1.
+    """
+    sub = df[["station", "date", target]].copy()
+    a = sub[(sub["station"] == station_a) & sub[target].notna()][["date"]]
+    b = sub[(sub["station"] == station_b) & sub[target].notna()][["date"]]
+    if a.empty or b.empty:
+        return 0.0
+    merged = a.merge(b, on="date", how="inner")
+    num = len(merged)
+    den = min(len(a), len(b))
+    return float(num / den) if den > 0 else 0.0

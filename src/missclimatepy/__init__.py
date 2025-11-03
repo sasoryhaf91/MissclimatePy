@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover
     _HAS_VIZ = False
 
 
-__version__ = "0.1.1"
+__version__ = "0.1.0"
 
 
 def MissClimateImputer(  # type: ignore
