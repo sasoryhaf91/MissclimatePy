@@ -98,7 +98,7 @@ def _run(cfg: QuickstartConfig) -> Dict[str, Any]:
         # neighbor_distances devuelve distancias; aquí nos quedamos con los ids
         neigh = neighbor_distances(
             df[["station", "latitude", "longitude"]].drop_duplicates("station"),
-            n_neighbors=cfg.k_neighbors + 1  # incluye a sí misma en posición 0
+            cfg.k_neighbors + 1  # incluye a sí misma en posición 0
         )
         neighbor_map = {}
         for st, rows in neigh.groupby("station"):
