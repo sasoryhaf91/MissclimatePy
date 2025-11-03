@@ -1,372 +1,255 @@
-# src/missclimatepy/evaluate.py
-from __future__ import annotations
+# SPDX-License-Identifier: MIT
+"""
+Memory-lean fast evaluation (daily metrics only).
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+evaluate_all_stations_fast():
+- Trains one RandomForest per target station (LOSO by default).
+- Optional neighbor restriction (k_neighbors) via build_neighbor_map.
+- Optional controlled leakage with include_target_pct (0, or 1..95).
+- Computes DAILY metrics (MAE_d, RMSE_d, R2_d) only.
+- Streams results to CSV (log_csv) to minimize RAM if desired.
+"""
+
+from __future__ import annotations
+from typing import Iterable, Optional, Dict, List
+import time
+
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from .api import MissClimateImputer
-from .neighbors import neighbor_distances  # builds nearest-neighbor tables
+from .neighbors import build_neighbor_map
 
 
-# ---------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------
-def _safe_var(x: np.ndarray) -> float:
-    """Return variance as float, safe for empty arrays."""
-    if x.size == 0:
-        return 0.0
-    return float(np.var(x))
+# ---------- small helpers ----------
+
+def _safe_daily_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    if y_true.size == 0:
+        return {"MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan}
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    var = float(np.var(y_true))
+    r2 = r2_score(y_true, y_pred) if (y_true.size >= 2 and var > 0.0) else np.nan
+    return {"MAE_d": mae, "RMSE_d": rmse, "R2_d": r2}
 
 
-def _as_str_list(x: Iterable[Any]) -> str:
-    """Serialize an iterable of scalars as a comma-separated string."""
-    return ",".join(str(i) for i in x)
+def _resolve_cols(df: pd.DataFrame, names: Iterable[str]) -> List[str]:
+    low = {c.lower(): c for c in df.columns}
+    out = []
+    for n in names:
+        k = str(n).lower()
+        if k in low:
+            out.append(low[k])
+    return out
 
 
-# ---------------------------------------------------------------------
-# Masking for evaluation-only stations
-# ---------------------------------------------------------------------
-def mask_by_inclusion(
-    df: pd.DataFrame,
-    target: str,
-    train_frac: float,
-    min_obs: int,
-    random_state: int = 42,
-    only_stations: Optional[Iterable[str]] = None,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Create a masked copy of `df` where we hide the target values ONLY for the
-    stations we want to evaluate. All other stations remain intact and can be
-    fully used for training. This lets us train on the *full* network while
-    evaluating just a subset.
-
-    Parameters
-    ----------
-    df : DataFrame
-        Must contain at least ["station", target].
-    target : str
-        Target column to mask.
-    train_frac : float in [0, 1]
-        Percentage of valid observations kept for *training* inside each
-        evaluated station (the rest are masked and used for validation).
-        - 0.0 == strict LOSO (no rows from target station kept in training).
-        - 0.8 == keep 80% for training, mask 20% for validation.
-    min_obs : int
-        Minimum valid rows in a station to consider it for masking/evaluation.
-    random_state : int
-        RNG seed for sampling.
-    only_stations : iterable of str or None
-        If given, only those stations are masked/evaluated. Otherwise, mask all.
-
-    Returns
-    -------
-    (masked_df, info_df)
-      - masked_df : DataFrame with masked `target` on evaluated stations.
-      - info_df   : Per-station counts of total/train/valid used during masking.
-    """
-    assert 0.0 <= train_frac <= 1.0
-    rng = np.random.default_rng(random_state)
-
-    masked = df.copy()
-    masked["station"] = masked["station"].astype(str)
-
-    eval_set: Optional[set] = None
-    if only_stations is not None:
-        eval_set = set(str(s) for s in only_stations)
-
-    info_rows: List[Dict[str, Any]] = []
-    for st, sub in masked.groupby("station", sort=False):
-        idx_obs = sub[sub[target].notna()].index.values
-        if len(idx_obs) < int(min_obs):
-            continue
-
-        # Mask only when station is in the evaluation set (or if no filter provided).
-        do_mask = (eval_set is None) or (st in eval_set)
-
-        if do_mask:
-            n_train = int(len(idx_obs) * train_frac)
-            if n_train > 0:
-                train_idx = rng.choice(idx_obs, size=n_train, replace=False)
-                valid_idx = np.setdiff1d(idx_obs, train_idx)
-            else:
-                train_idx = np.array([], dtype=int)
-                valid_idx = idx_obs
-
-            masked.loc[valid_idx, target] = np.nan
-            info_rows.append(
-                {
-                    "station": st,
-                    "n_total": int(len(idx_obs)),
-                    "n_train": int(len(train_idx)),
-                    "n_valid": int(len(valid_idx)),
-                }
-            )
-        # else: leave this station untouched; it will contribute fully to training.
-
-    return masked, pd.DataFrame(info_rows)
+def _append_rows_to_csv(rows: List[Dict], path: Optional[str], header_written: Dict[str, bool]):
+    if not rows or path is None:
+        return
+    tmp = pd.DataFrame(rows)
+    write_header = not header_written.get(path, False)
+    tmp.to_csv(path, mode="a", index=False, header=write_header)
+    header_written[path] = True
 
 
-# ---------------------------------------------------------------------
-# Neighbor correlation/overlap (for metadata columns)
-# ---------------------------------------------------------------------
-def _neighbor_stats(
-    df_long: pd.DataFrame,
+# ---------- public API ----------
+
+def evaluate_all_stations_fast(
+    data: pd.DataFrame,
     *,
-    id_col: str,
-    date_col: str,
-    val_col: str,
-    station: str,
-    neighbor_ids: List[str],
-    min_overlap: int = 60,
-) -> Tuple[List[str], List[float], List[int], List[str], List[float]]:
-    """
-    Compute per-neighbor Pearson correlations and overlap counts (days in common)
-    between a target station and each neighbor.
-
-    Returns tuple of lists all aligned to `neighbor_ids` order:
-      (neighbors_ids, neighbors_corr, neighbors_overlap, top5_ids, top5_corr)
-
-    Notes
-    -----
-    - Correlation is set to NaN if overlap < `min_overlap` or variance is zero.
-    - Date alignment is done with an inner join on [date_col].
-    """
-    if not neighbor_ids:
-        return [], [], [], [], []
-
-    # Subset only the rows we need, pivot to a (date x station) wide matrix
-    df = df_long[[id_col, date_col, val_col]].copy()
-    df = df[df[id_col].isin([station] + neighbor_ids)]
-
-    wide = df.pivot_table(index=date_col, columns=id_col, values=val_col, aggfunc="mean")
-    wide = wide.sort_index()
-
-    if station not in wide.columns:
-        return neighbor_ids, [np.nan] * len(neighbor_ids), [0] * len(neighbor_ids), [], []
-
-    s_main = wide[station]
-    corr_list: List[float] = []
-    olap_list: List[int] = []
-
-    for nid in neighbor_ids:
-        if nid not in wide.columns:
-            corr_list.append(np.nan)
-            olap_list.append(0)
-            continue
-        pair = pd.concat([s_main, wide[nid]], axis=1, join="inner").dropna()
-        n = int(len(pair))
-        if n < int(min_overlap):
-            corr_list.append(np.nan)
-            olap_list.append(n)
-            continue
-        a = pair.iloc[:, 0].to_numpy()
-        b = pair.iloc[:, 1].to_numpy()
-        if _safe_var(a) == 0.0 or _safe_var(b) == 0.0:
-            corr_list.append(np.nan)
-            olap_list.append(n)
-            continue
-        corr = float(np.corrcoef(a, b)[0, 1])
-        corr_list.append(corr)
-        olap_list.append(n)
-
-    # Top-5 neighbors by correlation (descending), ignoring NaNs
-    order = (
-        pd.Series(corr_list, index=neighbor_ids)
-        .sort_values(ascending=False, na_position="last")
-        .index.tolist()
-    )
-    top_ids = [nid for nid in order if pd.notna(pd.Series(corr_list, index=neighbor_ids).get(nid))][:5]
-    top_corr = [float(pd.Series(corr_list, index=neighbor_ids).get(nid)) for nid in top_ids]
-
-    return neighbor_ids, corr_list, olap_list, top_ids, top_corr
-
-
-# ---------------------------------------------------------------------
-# Main evaluation
-# ---------------------------------------------------------------------
-def evaluate_per_station(
-    df_src: pd.DataFrame,
-    target: str,
-    train_frac: float = 0.7,
-    min_obs: int = 60,
-    engine: str = "rf",
-    k_neighbors: Optional[int] = None,
-    model_params: Optional[Dict[str, Any]] = None,
-    random_state: int = 42,
+    id_col: str = "station",
+    date_col: str = "date",
+    lat_col: str = "latitude",
+    lon_col: str = "longitude",
+    alt_col: str = "altitude",
+    target_col: str = "tmin",
+    station_ids: Optional[Iterable[int]] = None,
+    prefix: Optional[Iterable[str]] = None,
+    regex: Optional[str] = None,
+    start: str = "1991-01-01",
+    end: str = "2020-12-31",
+    rf_params: Dict = dict(n_estimators=15, max_depth=30, random_state=42, n_jobs=-1),
     n_jobs: int = -1,
-    eval_stations: Optional[Iterable[str]] = None,
-    neighbor_map: Optional[Dict[str, List[str]]] = None,
-    corr_min_overlap: int = 60,
+    k_neighbors: Optional[int] = None,
+    neighbor_map: Optional[Dict[int, List[int]]] = None,
+    include_target_pct: float = 0.0,
+    include_target_seed: int = 42,
+    min_station_rows: Optional[int] = None,
+    log_csv: Optional[str] = None,
+    flush_every: int = 20,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
     """
-    Train on the full (period-filtered) universe and evaluate ONLY the stations
-    in `eval_stations` (if provided). Masking is applied *only* to those stations.
-
-    The returned DataFrame includes metrics and rich metadata:
-
-        ["station","n_valid","MAE","RMSE","R2",
-         "rows_train","rows_test","used_k_neighbors",
-         "neighbors_ids","neighbors_corr","neighbors_overlap",
-         "neighbors_top5","neighbors_top5_corr"]
+    Fast LOSO-style evaluation with optional neighbor restriction and
+    optional target leakage. Returns a DataFrame with daily metrics.
 
     Parameters
     ----------
-    df_src : DataFrame
-        Long-format table with at least:
-          ["station","latitude","longitude","date", target]
-    target : str
-        Target column to impute/predict.
-    train_frac : float
-        0.0 = strict LOSO; 0.8 = keep 80% for training inside evaluated stations.
-    min_obs : int
-        Minimum valid rows for a station to be even considered for evaluation.
-    engine : str
-        Model engine name passed to `MissClimateImputer` (e.g., "rf").
-    k_neighbors : int or None
-        If given, the imputer may restrict training/prediction to local neighbors
-        when making per-station predictions.
-    model_params : dict or None
-        Forwarded to the imputer (e.g., {"rf_params": {...}}).
-    random_state : int
-        RNG seed for masking and underlying models.
-    n_jobs : int
-        Parallelism for the underlying model (when supported).
-    eval_stations : iterable of str or None
-        Subset of stations to evaluate; if None, evaluate all.
-    neighbor_map : dict or None
-        Optional precomputed neighbor map {station -> [neighbor_ids]} used both
-        by the imputer and for correlation metadata. If None and k_neighbors is
-        provided, it is built here from coordinates.
-    corr_min_overlap : int
-        Minimum overlapping days when computing neighbor correlations.
-
-    Returns
-    -------
-    DataFrame with metrics and metadata per evaluated station.
+    include_target_pct : float
+        0.0 => strict LOSO; values in [1, 95] allowed (we internally clamp
+        0<pct<1 to 1, and pct>95 to 95).
     """
-    # Normalize station as string
-    df_src = df_src.copy()
-    df_src["station"] = df_src["station"].astype(str)
+    t0_all = time.time()
 
-    # 1) Decide which stations are evaluated
-    if eval_stations is None:
-        eval_set = set(df_src["station"].unique().tolist())
+    cols_needed = _resolve_cols(
+        data, [id_col, date_col, lat_col, lon_col, alt_col, target_col]
+    )
+    if len(cols_needed) < 6:
+        missing = set([id_col, date_col, lat_col, lon_col, alt_col, target_col]) - set(cols_needed)
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    df = data[cols_needed].copy()
+
+    # dtypes (lean memory)
+    df[id_col] = df[id_col].astype("int32", copy=False)
+    df[lat_col] = df[lat_col].astype("float32", copy=False)
+    df[lon_col] = df[lon_col].astype("float32", copy=False)
+    df[alt_col] = df[alt_col].astype("float32", copy=False)
+    df[target_col] = df[target_col].astype("float32", copy=False)
+
+    dt = pd.to_datetime(df[date_col], errors="coerce")
+    if pd.api.types.is_datetime64tz_dtype(dt):
+        dt = dt.dt.tz_localize(None)
+    df[date_col] = dt
+    df = df.dropna(subset=[date_col])
+
+    lo = pd.to_datetime(start)
+    hi = pd.to_datetime(end)
+    df = df[(df[date_col] >= lo) & (df[date_col] <= hi)]
+
+    # simple time features
+    df["doy"] = df[date_col].dt.dayofyear.astype("int16")
+    df["month"] = df[date_col].dt.month.astype("int8")
+    df["year"] = df[date_col].dt.year.astype("int16")
+
+    feat_cols = [lat_col, lon_col, alt_col, "year", "month", "doy"]
+    valid_mask = ~df[feat_cols + [target_col]].isna().any(axis=1)
+
+    all_ids = df[id_col].unique().tolist()
+    if station_ids:
+        eval_ids = [int(s) for s in station_ids]
     else:
-        eval_set = set(str(s) for s in eval_stations)
+        eval_ids = all_ids.copy()
+        if prefix:
+            pref = prefix if isinstance(prefix, (list, tuple)) else [prefix]
+            eval_ids = [s for s in eval_ids if any(str(s).startswith(p) for p in pref)]
+        if regex:
+            import re as _re
+            pat = _re.compile(regex)
+            eval_ids = [s for s in eval_ids if pat.match(str(s))]
+    eval_ids = sorted({int(s) for s in eval_ids})
 
-    # 2) Mask ONLY evaluated stations; keep others intact for training
-    masked, info_df = mask_by_inclusion(
-        df_src, target, train_frac, min_obs,
-        random_state=random_state, only_stations=eval_set
-    )
+    if min_station_rows is not None:
+        counts = df.loc[valid_mask, [id_col]].groupby(id_col).size().astype(int)
+        before = len(eval_ids)
+        eval_ids = [s for s in eval_ids if int(counts.get(s, 0)) >= int(min_station_rows)]
+        if show_progress:
+            print(f"[filter] min_station_rows={min_station_rows}: {before} → {len(eval_ids)} stations")
 
-    # 3) Build neighbor map if requested and not provided
     if k_neighbors is not None and neighbor_map is None:
-        nn = neighbor_distances(
-            df_src[["station", "latitude", "longitude"]].drop_duplicates("station"),
-            k=int(k_neighbors) + 1  # self + k neighbors
-        )
-        nmap: Dict[str, List[str]] = {}
-        for st, rows in nn.groupby("station"):
-            # sort by distance and take first k that are not itself
-            ids = rows.sort_values("distance_km")["neighbor"].astype(str).tolist()
-            nmap[str(st)] = [i for i in ids if i != str(st)][: int(k_neighbors)]
-        neighbor_map = nmap
-
-    # 4) Global imputer (it can still use local neighbors internally)
-    imp = MissClimateImputer(
-        engine=engine,
-        target=target,
-        k_neighbors=k_neighbors,
-        min_obs_per_station=max(0, int(min_obs * train_frac)),  # 0 for strict LOSO
-        n_jobs=n_jobs,
-        random_state=random_state,
-        model_params=model_params,
-    )
-
-    # Fit & transform across the whole dataset (masked only on eval stations)
-    imp_df = imp.fit_transform(masked)
-
-    # 5) Collect metrics per evaluated station + metadata
-    rows: List[Dict[str, Any]] = []
-
-    # Preselect columns for correlation stats (avoid copying inside loop)
-    has_date = "date" in df_src.columns
-    if not has_date:
-        # For correlation metadata we need a date column; if not present, we skip it.
-        pass
-
-    for st, sub in df_src.groupby("station", sort=False):
-        if st not in eval_set:
-            continue
-
-        # indices where that station was masked (validation set)
-        msub = masked[masked["station"] == st]
-        idx = msub[msub[target].isna() & sub[target].notna()].index
-        if len(idx) == 0:
-            # nothing to score (either not enough obs or train_frac ~ 1.0)
-            continue
-
-        y_true = sub.loc[idx, target].to_numpy()
-        y_pred = imp_df.loc[idx, target].to_numpy()
-        ok = np.isfinite(y_true) & np.isfinite(y_pred)
-        if ok.sum() == 0:
-            continue
-
-        # ---- Neighbor metadata ----
-        used_k = int(k_neighbors or 0)
-        neigh_ids: List[str] = []
-        neigh_corr: List[float] = []
-        neigh_olap: List[int] = []
-        top_ids: List[str] = []
-        top_corr: List[float] = []
-
-        if used_k > 0 and neighbor_map is not None:
-            neigh_ids = neighbor_map.get(st, [])[:used_k]
-            if has_date and len(neigh_ids) > 0:
-                ids, corr, olap, top5_ids, top5_corr = _neighbor_stats(
-                    df_src,
-                    id_col="station",
-                    date_col="date",
-                    val_col=target,
-                    station=st,
-                    neighbor_ids=neigh_ids,
-                    min_overlap=int(corr_min_overlap),
-                )
-                neigh_ids, neigh_corr, neigh_olap = ids, corr, olap
-                top_ids, top_corr = top5_ids, top5_corr
-
-        rows.append(
-            {
-                "station": st,
-                "n_valid": int(ok.sum()),
-                "MAE": mean_absolute_error(y_true[ok], y_pred[ok]),
-                "RMSE": mean_squared_error(y_true[ok], y_pred[ok], squared=False),
-                "R2": r2_score(y_true[ok], y_pred[ok]),
-                # training / test sizes
-                "rows_train": int(masked[target].notna().sum()),
-                "rows_test": int(len(idx)),
-                # neighbors metadata
-                "used_k_neighbors": used_k,
-                "neighbors_ids": _as_str_list(neigh_ids),
-                "neighbors_corr": _as_str_list(f"{c:.6f}" if pd.notna(c) else "nan" for c in neigh_corr),
-                "neighbors_overlap": _as_str_list(neigh_olap),
-                "neighbors_top5": _as_str_list(top_ids),
-                "neighbors_top5_corr": _as_str_list(f"{c:.6f}" if pd.notna(c) else "nan" for c in top_corr),
-            }
+        neighbor_map = build_neighbor_map(
+            df, id_col=id_col, lat_col=lat_col, lon_col=lon_col, k_neighbors=k_neighbors
         )
 
-    cols = [
-        "station", "n_valid", "MAE", "RMSE", "R2",
-        "rows_train", "rows_test",
-        "used_k_neighbors",
-        "neighbors_ids", "neighbors_corr", "neighbors_overlap",
-        "neighbors_top5", "neighbors_top5_corr",
-    ]
-    return (
-        pd.DataFrame(rows, columns=cols).sort_values("RMSE").reset_index(drop=True)
-        if rows else
-        pd.DataFrame(columns=cols)
+    header_flag: Dict[str, bool] = {}
+    rows: List[Dict] = []
+    pending: List[Dict] = []
+    it = eval_ids if not show_progress else __import__("tqdm").auto.tqdm(eval_ids, desc="Stations", unit="st")
+
+    rf_default = dict(
+        n_estimators=rf_params.get("n_estimators", 15),
+        max_depth=rf_params.get("max_depth", 30),
+        random_state=rf_params.get("random_state", 42),
+        n_jobs=rf_params.get("n_jobs", -1),
+        bootstrap=rf_params.get("bootstrap", True),
+        max_samples=rf_params.get("max_samples", None),
     )
+
+    pct = float(include_target_pct or 0.0)
+    if pct < 0:
+        pct = 0.0
+    if 0 < pct < 1:
+        pct = 1.0
+    if pct > 95:
+        pct = 95.0
+
+    for sid in it:
+        t0 = time.time()
+        is_target = (df[id_col] == sid)
+        test_mask = is_target & valid_mask
+        test_df = df.loc[test_mask, [date_col] + feat_cols + [target_col]]
+        if test_df.empty:
+            sec = time.time() - t0
+            row = dict(station=int(sid), n_rows=0, seconds=sec,
+                       MAE_d=np.nan, RMSE_d=np.nan, R2_d=np.nan,
+                       include_target_pct=pct)
+            rows.append(row)
+            pending.append(row)
+            if log_csv and len(pending) >= flush_every:
+                _append_rows_to_csv(pending, log_csv, header_flag)
+                pending = []
+            continue
+
+        if k_neighbors is None:
+            train_mask = (~is_target) & valid_mask
+        else:
+            neigh_ids = (neighbor_map or {}).get(int(sid), [])
+            train_mask = (df[id_col].isin(neigh_ids) & valid_mask) if neigh_ids else ((~is_target) & valid_mask)
+
+        train_df = df.loc[train_mask, feat_cols + [target_col]]
+
+        if pct >= 1.0:
+            n_take = int(np.ceil(len(test_df) * (pct / 100.0)))
+            leak_idx = test_df.sample(n=n_take, random_state=include_target_seed).index
+            leak_df = df.loc[leak_idx, feat_cols + [target_col]]
+            train_df = pd.concat([train_df, leak_df], axis=0, copy=False)
+
+        if train_df.empty:
+            sec = time.time() - t0
+            row = dict(station=int(sid), n_rows=0, seconds=sec,
+                       MAE_d=np.nan, RMSE_d=np.nan, R2_d=np.nan,
+                       include_target_pct=pct)
+            rows.append(row)
+            pending.append(row)
+            if log_csv and len(pending) >= flush_every:
+                _append_rows_to_csv(pending, log_csv, header_flag)
+                pending = []
+            continue
+
+        X_train = train_df[feat_cols].to_numpy(copy=False)
+        y_train = train_df[target_col].to_numpy(copy=False)
+        X_test  = test_df[feat_cols].to_numpy(copy=False)
+        y_test  = test_df[target_col].to_numpy(copy=False)
+
+        model = RandomForestRegressor(**rf_default)
+        model.fit(X_train, y_train)
+        y_hat = model.predict(X_test).astype("float32", copy=False)
+
+        m = _safe_daily_metrics(y_test, y_hat)
+        sec = time.time() - t0
+
+        st_coords = df.loc[df[id_col] == sid, [lat_col, lon_col, alt_col]].median()
+        row = dict(
+            station=int(sid), n_rows=int(len(y_test)), seconds=sec,
+            MAE_d=float(m["MAE_d"]), RMSE_d=float(m["RMSE_d"]), R2_d=float(m["R2_d"]),
+            include_target_pct=pct,
+            **{lat_col: float(st_coords[lat_col]),
+               lon_col: float(st_coords[lon_col]),
+               alt_col: float(st_coords[alt_col])},
+        )
+        rows.append(row)
+        pending.append(row)
+        if log_csv and len(pending) >= flush_every:
+            _append_rows_to_csv(pending, log_csv, header_flag)
+            pending = []
+
+    if log_csv and pending:
+        _append_rows_to_csv(pending, log_csv, header_flag)
+
+    out = pd.DataFrame(rows).sort_values("station").reset_index(drop=True)
+    if show_progress:
+        total_sec = time.time() - t0_all
+        print(f"Done. {len(eval_ids)} stations in {total_sec:.1f}s "
+              f"(avg {total_sec / max(1, len(eval_ids)):.2f}s/station).")
+    return out
