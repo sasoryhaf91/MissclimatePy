@@ -1,31 +1,28 @@
 # src/missclimatepy/neighbors.py
 from __future__ import annotations
 
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
-#from typing import Optional
 
-
+# ----------------------------- small helpers ----------------------------- #
 def _to_radians(x: np.ndarray) -> np.ndarray:
-    """Helper: degrees -> radians."""
-    return np.deg2rad(x.astype(float))
+    """Degrees -> radians with safe float casting."""
+    return np.deg2rad(np.asarray(x, dtype=float))
 
 
 def _haversine_matrix(lat: np.ndarray, lon: np.ndarray, radius_km: float = 6371.0088) -> np.ndarray:
     """
-    Compute the full pairwise Haversine distance matrix (km) for coordinates.
+    Full pairwise Haversine distance matrix (km) for coordinates.
 
     Parameters
     ----------
-    lat, lon : np.ndarray
-        1D arrays (n,) with latitudes and longitudes in degrees.
-    radius_km : float, default 6371.0088
-        Earth radius (km).
+    lat, lon : 1D arrays (n,) with coordinates in degrees.
+    radius_km : Earth radius in km.
 
     Returns
     -------
-    np.ndarray
-        (n, n) matrix of distances in km (diagonal is 0).
+    (n, n) ndarray of distances in km (diagonal is 0).
     """
     lat_r = _to_radians(lat)
     lon_r = _to_radians(lon)
@@ -38,7 +35,122 @@ def _haversine_matrix(lat: np.ndarray, lon: np.ndarray, radius_km: float = 6371.
     return radius_km * c
 
 
+def _resolve_col(df: pd.DataFrame, candidates: List[str]) -> str:
+    """
+    Return the first existing column (case-insensitive) among `candidates`.
+    Raise ValueError if none is found.
+    """
+    lower = {c.lower(): c for c in df.columns}
+    for c in candidates:
+        name = c.lower()
+        if name in lower:
+            return lower[name]
+    raise ValueError(f"Expected one of {candidates} in DataFrame, got: {list(df.columns)}")
+
+
+def _resolve_alt_col(df: pd.DataFrame) -> Optional[str]:
+    """Return altitude/elevation column name if present, else None."""
+    for c in ["altitude", "elevation", "alt", "elev"]:
+        for col in df.columns:
+            if col.lower() == c:
+                return col
+    return None
+
+
+# ----------------------------- public API -------------------------------- #
 def neighbor_distances(
+    df_coords: pd.DataFrame,
+    n_neighbors: Optional[int] = None,
+    *,
+    # Backwards-compatible aliases:
+    k_neighbors: Optional[int] = None,
+    k: Optional[int] = None,
+    radius_km: float = 6371.0088,
+) -> Dict[int, List[int]]:
+    """
+    Build a neighbor map (by Haversine distance) for each station.
+
+    This function returns, for every station, an ordered list of neighbors
+    **including the station itself in position 0**. This matches the usage in
+    `quickstart.py`, where we typically request `n_neighbors = K + 1` and then
+    drop index 0 to keep the K nearest other stations.
+
+    Parameters
+    ----------
+    df_coords : DataFrame
+        Must contain (case-insensitive) id and coordinate columns:
+        - station id: one of ["station", "estacion", "id"]
+        - latitude : one of ["latitude", "lat", "y"]
+        - longitude: one of ["longitude", "lon", "x"]
+        Extra columns are ignored.
+    n_neighbors : int, optional
+        Number of neighbors to return **including the station itself**.
+        If None, resolved from `k_neighbors` or `k`; defaults to 20.
+    k_neighbors, k : int, optional
+        Backwards-compatible aliases for `n_neighbors`.
+    radius_km : float
+        Earth radius for Haversine (km).
+
+    Returns
+    -------
+    Dict[int, List[int]]
+        Mapping station_id -> [self, n1, n2, ...] ordered by distance (ascending).
+    """
+    # --- resolve K with aliases
+    if n_neighbors is None:
+        if k_neighbors is not None:
+            n_neighbors = int(k_neighbors)
+        elif k is not None:
+            n_neighbors = int(k)
+        else:
+            n_neighbors = 20
+    n_neighbors = int(max(1, n_neighbors))
+
+    # --- resolve essential columns
+    id_col = _resolve_col(df_coords, ["station", "estacion", "id"])
+    lat_col = _resolve_col(df_coords, ["latitude", "lat", "y"])
+    lon_col = _resolve_col(df_coords, ["longitude", "lon", "x"])
+
+    # one row per station id
+    co = df_coords[[id_col, lat_col, lon_col]].drop_duplicates(subset=[id_col]).reset_index(drop=True)
+    if co.empty:
+        return {}
+
+    # compute pairwise distances
+    D = _haversine_matrix(co[lat_col].to_numpy(), co[lon_col].to_numpy(), radius_km=radius_km)
+
+    # cap to dataset size
+    k_eff = int(min(n_neighbors, len(co)))
+
+    # indices of k smallest distances per row
+    # (include self; diagonal is 0, so self will always appear)
+    idx_k = np.argpartition(D, kth=k_eff - 1, axis=1)[:, :k_eff]
+
+    # build ordered mapping
+    ids = co[id_col].astype(int).to_numpy()
+    mapping: Dict[int, List[int]] = {}
+
+    for i in range(len(co)):
+        idxs = idx_k[i]
+        dists = D[i, idxs]
+        order = np.argsort(dists)               # ensure ascending by true distance
+        idxs = idxs[order]
+        neigh_ids = ids[idxs].tolist()
+
+        # guarantee self is at position 0 (should already be, but enforce just in case)
+        self_id = int(ids[i])
+        if neigh_ids[0] != self_id:
+            if self_id in neigh_ids:
+                neigh_ids.remove(self_id)
+            neigh_ids = [self_id] + neigh_ids
+
+        # trim to requested length
+        mapping[self_id] = neigh_ids[:k_eff]
+
+    return mapping
+
+
+def neighbor_distances_long(
     stations: pd.DataFrame,
     *,
     k_neighbors: int = 20,
@@ -46,138 +158,105 @@ def neighbor_distances(
     include_self: bool = False,
 ) -> pd.DataFrame:
     """
-    Compute K nearest neighbors per station using Haversine distance.
-
-    Parameters
-    ----------
-    stations : DataFrame
-        DataFrame with at least columns: 'station', 'latitude', 'longitude'.
-        'elevation' is accepted but not required for the distance itself.
-        Duplicates by ('station','latitude','longitude') will be dropped.
-    k_neighbors : int, default 20
-        Number of neighbors to return **per station**.
-    radius_km : float, default 6371.0088
-        Earth radius for Haversine distance.
-    include_self : bool, default False
-        If True, a station can appear as its own neighbor with distance 0.
-        If False, self-pairs are excluded.
+    DataFrame (long format) version similar to your original implementation.
 
     Returns
     -------
-    DataFrame
-        Columns:
-        - station : str (source station)
-        - neighbor: str (neighbor station)
-        - rank    : int (1..K)
-        - distance_km : float
-
-    Notes
-    -----
-    - Complexity is O(n^2). For >~10k stations consider chunking or
-      approximate nearest neighbors.
+    DataFrame with columns:
+        station, neighbor, rank, distance_km
     """
-    required = {"station", "latitude", "longitude"}
-    missing = required - set(stations.columns)
-    if missing:
-        raise ValueError(f"neighbor_distances: missing columns {sorted(missing)}")
+    id_col = _resolve_col(stations, ["station", "estacion", "id"])
+    lat_col = _resolve_col(stations, ["latitude", "lat", "y"])
+    lon_col = _resolve_col(stations, ["longitude", "lon", "x"])
 
-    # De-duplicate coordinates per station
-    df = (
-        stations[[c for c in ["station", "latitude", "longitude", "elevation"] if c in stations.columns]]
-        .drop_duplicates(subset=["station", "latitude", "longitude"])
-        .reset_index(drop=True)
-        .copy()
-    )
+    df = stations[[id_col, lat_col, lon_col]].drop_duplicates(subset=[id_col]).reset_index(drop=True).copy()
     n = len(df)
     if n == 0:
         return pd.DataFrame(columns=["station", "neighbor", "rank", "distance_km"])
 
-    # Pairwise distances
-    D = _haversine_matrix(df["latitude"].to_numpy(), df["longitude"].to_numpy(), radius_km=radius_km)
-
-    # Exclude self if requested
+    D = _haversine_matrix(df[lat_col].to_numpy(), df[lon_col].to_numpy(), radius_km=radius_km)
     if not include_self:
         np.fill_diagonal(D, np.inf)
 
-    # How many neighbors we can actually provide (<= n or n-1)
     k_eff = int(min(max(k_neighbors, 0), n if include_self else max(0, n - 1)))
     if k_eff == 0:
-        # Nothing to return (e.g., n=1 and include_self=False)
         return pd.DataFrame(columns=["station", "neighbor", "rank", "distance_km"])
 
-    # Get indices of K smallest distances for each row
-    # argsort along axis=1 and take first k
     nbr_idx = np.argpartition(D, kth=k_eff - 1, axis=1)[:, :k_eff]
-
-    # Sort those K by true distance to have rank-consistent ordering
-    rows = []
-    stations_arr = df["station"].astype(str).to_numpy()
+    rows: List[Tuple[int, int, int, float]] = []
+    stations_arr = df[id_col].astype(int).to_numpy()
     for i in range(n):
         idxs = nbr_idx[i]
         dists = D[i, idxs]
         order = np.argsort(dists)
         idxs = idxs[order]
         dists = dists[order]
-        src = stations_arr[i]
+        src = int(stations_arr[i])
         for r, (j, d) in enumerate(zip(idxs, dists), start=1):
-            rows.append((src, stations_arr[j], r, float(d)))
-
+            rows.append((src, int(stations_arr[j]), r, float(d)))
     out = pd.DataFrame(rows, columns=["station", "neighbor", "rank", "distance_km"])
     return out
 
-def _station_xy(df: pd.DataFrame, station: str) -> tuple[float, float, float]:
-    row = (
-        df.loc[df["station"] == station, ["latitude", "longitude", "elevation"]]
-        .drop_duplicates()
-        .iloc[0]
-    )
-    return float(row["latitude"]), float(row["longitude"]), float(row["elevation"])
+
+# --------------------- utilities with altitude/elevation ------------------ #
+def _station_xyz(df: pd.DataFrame, station: int | str) -> Tuple[float, float, float]:
+    """Return (lat, lon, alt) using 'altitude' or 'elevation' if available."""
+    id_col = _resolve_col(df, ["station", "estacion", "id"])
+    lat_col = _resolve_col(df, ["latitude", "lat", "y"])
+    lon_col = _resolve_col(df, ["longitude", "lon", "x"])
+    alt_col = _resolve_alt_col(df)
+
+    cols = [lat_col, lon_col] + ([alt_col] if alt_col else [])
+    row = df.loc[df[id_col] == station, cols].drop_duplicates().iloc[0]
+    lat = float(row[lat_col])
+    lon = float(row[lon_col])
+    alt = float(row[alt_col]) if alt_col else float("nan")
+    return lat, lon, alt
 
 
-def get_station_neighbors(
-    df: pd.DataFrame, station: str, k_neighbors: int = 20
-) -> pd.DataFrame:
+def get_station_neighbors(df: pd.DataFrame, station: int | str, k_neighbors: int = 20) -> pd.DataFrame:
     """
-    Return the `k_neighbors` closest stations to `station` using Euclidean
-    distance in (lat, lon, elev) space, together with simple correlation
-    to the target if present (computed on overlapping valid rows).
+    Simple Euclidean neighbor list in (lat, lon, alt) space (alt optional).
+    Returns a DataFrame with columns [neighbor, dist, corr], where `corr` is left NaN.
     """
-    lat, lon, elev = _station_xy(df, station)
-    stations = (
-        df[["station", "latitude", "longitude", "elevation"]]
-        .drop_duplicates()
-        .copy()
-    )
-    stations = stations[stations["station"] != station]
-    dlat = stations["latitude"].to_numpy() - lat
-    dlon = stations["longitude"].to_numpy() - lon
-    delv = stations["elevation"].to_numpy() - elev
-    dist = np.sqrt(dlat**2 + dlon**2 + (delv / 1000.0) ** 2)  # mild scaling elev
+    id_col = _resolve_col(df, ["station", "estacion", "id"])
+    lat_col = _resolve_col(df, ["latitude", "lat", "y"])
+    lon_col = _resolve_col(df, ["longitude", "lon", "x"])
+    alt_col = _resolve_alt_col(df)
 
-    out = stations[["station"]].copy()
+    lat, lon, alt = _station_xyz(df, station)
+
+    stations = df[[id_col, lat_col, lon_col] + ([alt_col] if alt_col else [])].drop_duplicates().copy()
+    stations = stations[stations[id_col] != station]
+
+    dlat = stations[lat_col].to_numpy(dtype=float) - lat
+    dlon = stations[lon_col].to_numpy(dtype=float) - lon
+    if alt_col:
+        delv = stations[alt_col].to_numpy(dtype=float) - (alt if np.isfinite(alt) else 0.0)
+        dist = np.sqrt(dlat**2 + dlon**2 + (delv / 1000.0) ** 2)
+    else:
+        dist = np.sqrt(dlat**2 + dlon**2)
+
+    out = stations[[id_col]].copy()
+    out = out.rename(columns={id_col: "neighbor"})
     out["dist"] = dist
-
-    # naive corr using daily means per date when target exists
-    # note: we don't import target here; corr computed later on demand
-    out = out.sort_values("dist", ascending=True).head(k_neighbors)
-    out = out.rename(columns={"station": "neighbor"}).reset_index(drop=True)
-    out["corr"] = np.nan  # filled by caller optionally
+    out = out.sort_values("dist", ascending=True).head(k_neighbors).reset_index(drop=True)
+    out["corr"] = np.nan
     return out
 
 
-def neighbor_overlap_ratio(
-    df: pd.DataFrame, target: str, station_a: str, station_b: str
-) -> float:
+def neighbor_overlap_ratio(df: pd.DataFrame, target: str, station_a: int | str, station_b: int | str) -> float:
     """
-    Compute the ratio of overlapping valid days between two stations
-    for `target`. Returns 0..1.
+    Ratio of overlapping valid days between two stations for `target` (0..1).
     """
-    sub = df[["station", "date", target]].copy()
-    a = sub[(sub["station"] == station_a) & sub[target].notna()][["date"]]
-    b = sub[(sub["station"] == station_b) & sub[target].notna()][["date"]]
+    id_col = _resolve_col(df, ["station", "estacion", "id"])
+    date_col = _resolve_col(df, ["date", "fecha"])
+    sub = df[[id_col, date_col, target]].copy()
+    a = sub[(sub[id_col] == station_a) & sub[target].notna()][[date_col]]
+    b = sub[(sub[id_col] == station_b) & sub[target].notna()][[date_col]]
     if a.empty or b.empty:
         return 0.0
-    merged = a.merge(b, on="date", how="inner")
+    merged = a.merge(b, on=date_col, how="inner")
     num = len(merged)
     den = min(len(a), len(b))
     return float(num / den) if den > 0 else 0.0
