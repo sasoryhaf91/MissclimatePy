@@ -1,14 +1,31 @@
 # src/missclimatepy/__init__.py
-# SPDX-License-Identifier: MIT
+"""
+missclimatepy
+=============
 
-from .neighbors import neighbor_distances
-from .evaluate import evaluate_all_stations_fast, RFParams
-from .quickstart import run_quickstart, QuickstartConfig
+A minimal and reproducible local framework for imputing climate time series
+using only spatial (lat, lon, altitude) and temporal predictors.
+
+This package exposes a small, stable API for JOSS:
+- run_quickstart / QuickstartConfig
+- evaluate_all_stations_fast / RFParams
+- neighbor_distances
+"""
+
+from .api import (
+    run_quickstart,
+    QuickstartConfig,
+    evaluate_all_stations_fast,
+    RFParams,
+    neighbor_distances,
+)
 
 __all__ = [
-    "neighbor_distances",
-    "evaluate_all_stations_fast",
-    "RFParams",
     "run_quickstart",
     "QuickstartConfig",
+    "evaluate_all_stations_fast",
+    "RFParams",
+    "neighbor_distances",
 ]
+
+__version__ = "0.1.0"
