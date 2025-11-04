@@ -1,13 +1,13 @@
 from __future__ import annotations
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
-from .metrics import safe_metrics, aggregate_and_score
+from .metrics import safe_metrics
 from .neighbors import neighbor_distances as _neighbor_distances
 
 __all__ = ["RFParams", "evaluate_all_stations_fast"]

@@ -1,34 +1,73 @@
-from __future__ import annotations
+# src/missclimatepy/io.py
+# SPDX-License-Identifier: MIT
+"""
+Lightweight I/O helpers for missclimatepy.
+
+- read_csv: thin wrapper around pandas.read_csv with sane defaults.
+- write_csv: convenience writer that creates parent dirs if needed.
+"""
+
+from __future__ import annotations  # ← Debe ser la primera sentencia (tras el docstring)
+
+import os
+from typing import Optional, Dict, Any
+
 import pandas as pd
-from pathlib import Path
 
-def load_any(path: str, parse_dates=("date",)):
-    if str(path).lower().endswith(".parquet"):
-        return pd.read_parquet(path)
-    return pd.read_csv(path, parse_dates=list(parse_dates))
-from __future__ import annotations
-import pandas as pd
-from typing import Iterable, Optional, Sequence
 
-__all__ = ["read_csv", "require_columns"]
+def _ensure_parent_dir(path: str) -> None:
+    """Create parent directory if it does not exist."""
+    d = os.path.dirname(os.path.abspath(path))
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
 
-def require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
 
-def read_csv(path: str, *, parse_dates: Optional[Iterable[str]] = None) -> pd.DataFrame:
+def read_csv(
+    path: str,
+    *,
+    parse_dates: Optional[list[str]] = None,
+    dtype: Optional[Dict[str, Any]] = None,
+    low_memory: bool = False,
+    **kwargs: Any,
+) -> pd.DataFrame:
     """
-    Thin wrapper around pandas.read_csv with robust date parsing and
-    dtype safety (let pandas infer numerics where possible).
-    """
-    df = pd.read_csv(path)
-    if parse_dates:
-        for c in parse_dates:
-            if c in df.columns:
-                df[c] = pd.to_datetime(df[c], errors="coerce")
-    return df
+    Read CSV with safe defaults.
 
-def save_parquet(df: pd.DataFrame, path: str):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
+    Parameters
+    ----------
+    path : str
+        File path.
+    parse_dates : list[str] | None
+        Columns to parse as dates (optional).
+    dtype : dict | None
+        Dtype mapping for columns (optional).
+    low_memory : bool
+        Keep False to avoid mixed dtypes across chunks.
+    **kwargs : Any
+        Extra arguments forwarded to pandas.read_csv.
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    return pd.read_csv(
+        path,
+        parse_dates=parse_dates,
+        dtype=dtype,
+        low_memory=low_memory,
+        **kwargs,
+    )
+
+
+def write_csv(df: pd.DataFrame, path: str, *, index: bool = False, **kwargs: Any) -> str:
+    """
+    Write DataFrame to CSV, creating parent directory if needed.
+
+    Returns
+    -------
+    str
+        The path written.
+    """
+    _ensure_parent_dir(path)
+    df.to_csv(path, index=index, **kwargs)
+    return path
