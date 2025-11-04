@@ -1,21 +1,38 @@
 # src/missclimatepy/quickstart.py
+# SPDX-License-Identifier: MIT
 """
-Quickstart wrapper
-------------------
+missclimatepy.quickstart
+========================
 
-One function to go from a CSV/DataFrame to a metrics report, exposing:
-- column mapping,
-- K neighbors,
-- include_target_pct,
-- RF hyperparameters.
+Small, opinionated façade around :func:`evaluate_all_stations_fast` to let users
+run a full evaluation with a minimal set of arguments.
 
-This is what most users will call first.
+It intentionally avoids schema normalization: the user tells us their column
+names (station, date, latitude, longitude, altitude, target).
+
+Example
+-------
+>>> from missclimatepy.quickstart import run_quickstart
+>>> report = run_quickstart(
+...     data_path="/path/to/data.csv",
+...     target="tmin",
+...     id_col="station", date_col="date",
+...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
+...     period=("1991-01-01","2020-12-31"),
+...     station_ids=["2038","2124","29007"],
+...     k_neighbors=20,
+...     include_target_pct=30.0,          # 0..95
+...     min_station_rows=9125,
+...     show_progress=True,
+... )
+>>> report.head()
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Sequence, Union
+from dataclasses import dataclass, field
+from typing import Iterable, List, Optional, Sequence, Tuple, Union
+
 import pandas as pd
 
 from .evaluate import evaluate_all_stations_fast, RFParams
@@ -23,79 +40,130 @@ from .evaluate import evaluate_all_stations_fast, RFParams
 
 @dataclass
 class QuickstartConfig:
-    # Data
-    data_path: Optional[str] = None           # if None, use `data` argument
-    data: Optional[pd.DataFrame] = None
+    """
+    Container for quickstart parameters.
 
-    # Column names
+    Notes
+    -----
+    - `rf_params` uses `default_factory` to avoid mutable-default errors.
+    - `data_path` may be a str (CSV or Parquet) **or** a DataFrame (already loaded).
+    """
+    # input
+    data_path: Union[str, pd.DataFrame]
+
+    # column names (generic schema; user-provided)
     id_col: str = "station"
     date_col: str = "date"
     lat_col: str = "latitude"
     lon_col: str = "longitude"
     alt_col: str = "altitude"
-    target_col: str = "tmin"
+    target: str = "tmin"
 
-    # Period
-    start: Optional[str] = None
-    end: Optional[str] = None
+    # period
+    period: Optional[Tuple[Optional[str], Optional[str]]] = None  # (start, end)
 
-    # Selection
+    # selection
     station_ids: Optional[Sequence[Union[str, int]]] = None
+    prefix: Optional[Iterable[str]] = None
+    regex: Optional[str] = None
+    custom_filter: Optional[callable] = None
     min_station_rows: Optional[int] = None
 
-    # Neighborhood & inclusion
-    k_neighbors: Optional[int] = 20
-    include_target_pct: float = 0.0
-    include_target_seed: int = 42
-
-    # Features / model
+    # features
     add_cyclic: bool = False
     feature_cols: Optional[List[str]] = None
-    rf_params: RFParams = RFParams(n_estimators=100, max_depth=None, n_jobs=-1, random_state=42)
 
-    # Output
-    show_progress: bool = True
+    # neighborhood & leakage
+    k_neighbors: Optional[int] = 20
+    include_target_pct: float = 0.0  # 0..95
+    include_target_seed: int = 42
+
+    # model
+    rf_params: RFParams = field(default_factory=RFParams)
+
+    # metrics/agg
+    agg_for_metrics: str = "sum"  # "sum"|"mean"|"median"
+
+    # UX / logging
+    show_progress: bool = False
     log_csv: Optional[str] = None
     flush_every: int = 20
+
+    # output
     save_table_path: Optional[str] = None
+    parquet_compression: str = "snappy"
+
+
+def _load_data(obj: Union[str, pd.DataFrame]) -> pd.DataFrame:
+    """Load CSV/Parquet path or pass through DataFrame."""
+    if isinstance(obj, pd.DataFrame):
+        return obj
+    path = str(obj).lower()
+    if path.endswith(".parquet") or path.endswith(".pq"):
+        return pd.read_parquet(obj)
+    # default to CSV (handles .csv.gz too)
+    return pd.read_csv(obj)
+
+
+def _run(cfg: QuickstartConfig) -> pd.DataFrame:
+    """Internal runner that wires QuickstartConfig into evaluate_all_stations_fast."""
+    df = _load_data(cfg.data_path)
+
+    start, end = (None, None)
+    if cfg.period is not None:
+        start, end = cfg.period
+
+    report = evaluate_all_stations_fast(
+        df,
+        # schema
+        id_col=cfg.id_col,
+        date_col=cfg.date_col,
+        lat_col=cfg.lat_col,
+        lon_col=cfg.lon_col,
+        alt_col=cfg.alt_col,
+        target_col=cfg.target,
+        # period
+        start=start,
+        end=end,
+        # features
+        add_cyclic=cfg.add_cyclic,
+        feature_cols=cfg.feature_cols,
+        # selection
+        prefix=cfg.prefix,
+        station_ids=cfg.station_ids,
+        regex=cfg.regex,
+        custom_filter=cfg.custom_filter,
+        min_station_rows=cfg.min_station_rows,
+        # neighborhood & leakage
+        k_neighbors=cfg.k_neighbors,
+        include_target_pct=cfg.include_target_pct,
+        include_target_seed=cfg.include_target_seed,
+        # model & metrics
+        rf_params=cfg.rf_params,
+        agg_for_metrics=cfg.agg_for_metrics,
+        # UX
+        show_progress=cfg.show_progress,
+        log_csv=cfg.log_csv,
+        flush_every=cfg.flush_every,
+        # output
+        save_table_path=cfg.save_table_path,
+        parquet_compression=cfg.parquet_compression,
+    )
+    return report
 
 
 def run_quickstart(**kwargs) -> pd.DataFrame:
     """
-    Run a one-shot evaluation based on keyword args matching QuickstartConfig.
+    Convenience entry point. Accepts any :class:`QuickstartConfig` field as a keyword
+    and returns the evaluation report (one row per station).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Sorted by daily RMSE ascending.
     """
     cfg = QuickstartConfig(**kwargs)
-
-    if cfg.data is None:
-        if not cfg.data_path:
-            raise ValueError("Either 'data' (DataFrame) or 'data_path' must be provided.")
-        ext = str(cfg.data_path).lower()
-        if ext.endswith(".parquet"):
-            df = pd.read_parquet(cfg.data_path)
-        else:
-            df = pd.read_csv(cfg.data_path)
-    else:
-        df = cfg.data
-
-    report = evaluate_all_stations_fast(
-        df,
-        id_col=cfg.id_col, date_col=cfg.date_col,
-        lat_col=cfg.lat_col, lon_col=cfg.lon_col, alt_col=cfg.alt_col,
-        target_col=cfg.target_col,
-        start=cfg.start, end=cfg.end,
-        add_cyclic=cfg.add_cyclic, feature_cols=cfg.feature_cols,
-        station_ids=cfg.station_ids,
-        min_station_rows=cfg.min_station_rows,
-        k_neighbors=cfg.k_neighbors,
-        include_target_pct=cfg.include_target_pct,
-        include_target_seed=cfg.include_target_seed,
-        rf_params=cfg.rf_params,
-        show_progress=cfg.show_progress,
-        log_csv=cfg.log_csv,
-        flush_every=cfg.flush_every,
-        save_table_path=cfg.save_table_path,
-    )
-    return report
+    return _run(cfg)
 
 
 __all__ = ["QuickstartConfig", "run_quickstart"]
