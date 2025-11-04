@@ -1,23 +1,12 @@
 # src/missclimatepy/__init__.py
-"""
-missclimatepy
-=============
-
-A minimal and reproducible local framework for imputing climate time series
-using only spatial (lat, lon, altitude) and temporal predictors.
-
-This package exposes a small, stable API for JOSS:
-- run_quickstart / QuickstartConfig
-- evaluate_all_stations_fast / RFParams
-- neighbor_distances
-"""
-
 from .api import (
     run_quickstart,
     QuickstartConfig,
     evaluate_all_stations_fast,
     RFParams,
     neighbor_distances,
+    build_neighbor_map,
+    MissClimateImputer,
 )
 
 __all__ = [
@@ -26,6 +15,8 @@ __all__ = [
     "evaluate_all_stations_fast",
     "RFParams",
     "neighbor_distances",
+    "build_neighbor_map",
+    "MissClimateImputer",
 ]
 
 __version__ = "0.1.0"

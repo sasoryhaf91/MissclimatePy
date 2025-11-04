@@ -3,23 +3,21 @@
 Neighbor utilities (Haversine KNN)
 ----------------------------------
 
-This module exposes a single public function:
-
-    neighbor_distances(stations, k_neighbors=20, radius_km=6371.0088, include_self=False)
-
-It computes K nearest neighbors per station using great-circle distances.
-Only 'station', 'latitude', and 'longitude' are required. 'altitude' can be
-present but is not used for distance here (kept purely local and fast).
+Public API
+----------
+- neighbor_distances(stations, k_neighbors=20, radius_km=6371.0088, include_self=False)
+- build_neighbor_map(df, id_col, lat_col, lon_col, k, include_self=False)
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import numpy as np
 import pandas as pd
-from typing import List
+from typing import Dict, List, Union
 
-__all__ = ["neighbor_distances"]
+StationId = Union[str, int]
+
+__all__ = ["neighbor_distances", "build_neighbor_map"]
 
 
 def _to_radians(x: np.ndarray) -> np.ndarray:
@@ -27,15 +25,10 @@ def _to_radians(x: np.ndarray) -> np.ndarray:
 
 
 def _haversine_matrix(lat: np.ndarray, lon: np.ndarray, radius_km: float = 6371.0088) -> np.ndarray:
-    """
-    Pairwise Haversine distance (km). Returns an (n,n) matrix.
-    """
     lat_r = _to_radians(lat)
     lon_r = _to_radians(lon)
-
     dlat = lat_r[:, None] - lat_r[None, :]
     dlon = lon_r[:, None] - lon_r[None, :]
-
     a = np.sin(dlat / 2.0) ** 2 + np.cos(lat_r)[:, None] * np.cos(lat_r)[None, :] * np.sin(dlon / 2.0) ** 2
     c = 2.0 * np.arcsin(np.minimum(1.0, np.sqrt(a)))
     return radius_km * c
@@ -49,31 +42,25 @@ def neighbor_distances(
     include_self: bool = False,
 ) -> pd.DataFrame:
     """
-    Compute K nearest neighbors per station (Haversine distance).
+    Compute K nearest neighbors per station using Haversine distance.
 
     Parameters
     ----------
-    stations : DataFrame
-        Must contain at least: 'station', 'latitude', 'longitude'.
-        Duplicates by (station, latitude, longitude) are dropped.
-    k_neighbors : int, default 20
+    stations : DataFrame with ['station','latitude','longitude'].
+    k_neighbors : int
         Number of neighbors to return per station (clipped to dataset size).
-    radius_km : float, default 6371.0088
-        Earth radius in kilometers.
-    include_self : bool, default False
-        If True, a station may appear as its own neighbor with distance 0.
+    include_self : bool
+        If False, self-pairs are removed; if True, self can appear with distance 0.
 
     Returns
     -------
-    DataFrame
-        Columns: ['station', 'neighbor', 'rank', 'distance_km'] with rank 1..K.
+    DataFrame with columns ['station','neighbor','rank','distance_km'].
     """
-    required = {"station", "latitude", "longitude"}
-    missing = required - set(stations.columns)
-    if missing:
-        raise ValueError(f"neighbor_distances: missing columns {sorted(missing)}")
+    req = {"station", "latitude", "longitude"}
+    miss = req - set(stations.columns)
+    if miss:
+        raise ValueError(f"neighbor_distances: missing columns {sorted(miss)}")
 
-    # Unique coordinate per station
     df = (
         stations[["station", "latitude", "longitude"]]
         .drop_duplicates(subset=["station", "latitude", "longitude"])
@@ -83,31 +70,59 @@ def neighbor_distances(
     if n == 0:
         return pd.DataFrame(columns=["station", "neighbor", "rank", "distance_km"])
 
-    # Pairwise distances
     D = _haversine_matrix(df["latitude"].to_numpy(), df["longitude"].to_numpy(), radius_km=radius_km)
-
-    # Exclude diagonal if requested
     if not include_self:
         np.fill_diagonal(D, np.inf)
 
-    # Effective K
     k_eff = int(min(max(k_neighbors, 0), n if include_self else max(0, n - 1)))
     if k_eff == 0:
         return pd.DataFrame(columns=["station", "neighbor", "rank", "distance_km"])
 
-    # Indices of the K smallest distances per row
     nbr_idx = np.argpartition(D, kth=k_eff - 1, axis=1)[:, :k_eff]
 
     rows: List[tuple] = []
-    stations_arr = df["station"].astype(str).to_numpy()
+    sarr = df["station"].astype(str).to_numpy()
     for i in range(n):
         idxs = nbr_idx[i]
         dists = D[i, idxs]
         order = np.argsort(dists)
-        idxs = idxs[order]
-        dists = dists[order]
-        src = stations_arr[i]
-        for r, (j, d) in enumerate(zip(idxs, dists), start=1):
-            rows.append((src, stations_arr[j], r, float(d)))
+        for r, j in enumerate(idxs[order], start=1):
+            rows.append((sarr[i], sarr[j], r, float(D[i, j])))
 
     return pd.DataFrame(rows, columns=["station", "neighbor", "rank", "distance_km"])
+
+
+def build_neighbor_map(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    lat_col: str,
+    lon_col: str,
+    k: int,
+    include_self: bool = False,
+) -> Dict[StationId, List[StationId]]:
+    """
+    Convenience wrapper used by legacy tests.
+
+    Builds a per-station neighbor list using CENTROIDS
+    (median of lat/lon per station) and Haversine KNN.
+
+    Returns
+    -------
+    dict[station_id -> list_of_neighbors]
+    """
+    centroids = (
+        df.groupby(id_col)[[lat_col, lon_col]]
+        .median()
+        .reset_index()
+        .rename(columns={id_col: "station", lat_col: "latitude", lon_col: "longitude"})
+    )
+    tbl = neighbor_distances(
+        stations=centroids,
+        k_neighbors=int(k),
+        include_self=bool(include_self),
+    )
+    nmap: Dict[StationId, List[StationId]] = {}
+    for st, sub in tbl.groupby("station"):
+        nmap[st] = sub.sort_values("rank")["neighbor"].tolist()
+    return nmap
