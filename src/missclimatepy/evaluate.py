@@ -119,16 +119,26 @@ def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False
 
 
 def _safe_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """Compute MAE/RMSE/R² robustly; R² = NaN for degenerate/short cases."""
+    """Compute MAE/RMSE/R² robustly; R² = NaN for degenerate/short cases.
+    Works with old scikit-learn (no 'squared' kw) and new versions."""
     if y_true.size == 0 or y_pred.size == 0:
         return {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan}
+
     mae = mean_absolute_error(y_true, y_pred)
-    rmse = mean_squared_error(y_true, y_pred, squared=False)
+
+    # Older sklearn doesn’t accept squared=; fall back to sqrt(MSE)
+    try:
+        rmse = mean_squared_error(y_true, y_pred, squared=False)  # new API
+    except TypeError:
+        rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))  # old API
+
     if y_true.size < 2 or float(np.var(y_true)) == 0.0:
         r2 = np.nan
     else:
         r2 = r2_score(y_true, y_pred)
+
     return {"MAE": mae, "RMSE": rmse, "R2": r2}
+
 
 
 _FREQ_ALIAS = {"M": "ME", "A": "YE", "Y": "YE", "Q": "QE"}
@@ -436,7 +446,8 @@ def evaluate_all_stations_fast(
                 "used_k_neighbors": used_k,
                 "include_target_pct": float(include_target_pct),
             }
-            rows.append(row); pending.append(row)
+            rows.append(row)
+            pending.append(row)
             if log_csv and len(pending) >= flush_every:
                 _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
                 pending = []
@@ -473,7 +484,8 @@ def evaluate_all_stations_fast(
                 "used_k_neighbors": used_k,
                 "include_target_pct": float(include_target_pct),
             }
-            rows.append(row); pending.append(row)
+            rows.append(row)
+            pending.append(row)
             if log_csv and len(pending) >= flush_every:
                 _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
                 pending = []
@@ -518,7 +530,8 @@ def evaluate_all_stations_fast(
             "used_k_neighbors": used_k,
             "include_target_pct": float(pct),
         }
-        rows.append(row); pending.append(row)
+        rows.append(row)
+        pending.append(row)
 
         if log_csv and len(pending) >= flush_every:
             _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)

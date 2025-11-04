@@ -1,40 +1,44 @@
 # SPDX-License-Identifier: MIT
 """
-Top-level exports for missclimatepy.
+missclimatepy
+=============
 
-We expose:
-- MissClimateImputer (from .api)
-- RFParams, evaluate_all_stations_fast (from .evaluate)
-- Optional: run_quickstart, QuickstartConfig (from .quickstart if present)
+Top-level package exports for **missclimatepy**.
+
+We keep imports minimal and stable to avoid circular-import issues during test
+collection. Public objects are re-exported here for a convenient API:
+
+- ``MissClimateImputer``: a lightweight, test-friendly imputer wrapper.
+- ``evaluate_all_stations_fast``: station-wise evaluator with optional
+  K-neighborhood training and controlled inclusion of target rows.
+- ``RFParams``: a small dataclass for RandomForest hyperparameters.
+
+Version is obtained from package metadata when available.
 """
 
 from __future__ import annotations
 
-# Core API
-from .api import MissClimateImputer  # <- only this from api
-
-# Evaluation utilities
-from .evaluate import RFParams, evaluate_all_stations_fast
-
-# Optional quickstart: re-export only if quickstart.py exists
+# ---- Version -----------------------------------------------------------------
 try:
-    from .quickstart import run_quickstart, QuickstartConfig  # type: ignore
-except Exception:
-    def run_quickstart(*args, **kwargs):  # type: ignore
-        raise ImportError(
-            "missclimatepy.quickstart is not available. "
-            "Include quickstart.py or import MissClimateImputer / "
-            "evaluate_all_stations_fast directly."
-        )
+    # Python 3.8+: read version from installed package metadata
+    from importlib.metadata import version, PackageNotFoundError
+except Exception:  # pragma: no cover
+    version = None  # type: ignore
+    PackageNotFoundError = Exception  # type: ignore
 
-    class QuickstartConfig:  # type: ignore
-        """Stub to avoid import errors when quickstart is absent."""
-        pass
+__version__: str
+try:
+    __version__ = version("missclimatepy") if version else "0.0.0"
+except PackageNotFoundError:  # during local dev / editable installs
+    __version__ = "0.0.0"
+
+# ---- Public API re-exports ---------------------------------------------------
+from .api import MissClimateImputer  # noqa: E402
+from .evaluate import evaluate_all_stations_fast, RFParams  # noqa: E402
 
 __all__ = [
     "MissClimateImputer",
-    "RFParams",
     "evaluate_all_stations_fast",
-    "run_quickstart",
-    "QuickstartConfig",
+    "RFParams",
+    "__version__",
 ]
