@@ -58,6 +58,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from pandas.api.types import DatetimeTZDtype
 
 try:
     from tqdm.auto import tqdm  # optional progress bars
@@ -102,7 +103,7 @@ def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
 
 def _ensure_datetime_naive(s: pd.Series) -> pd.Series:
     s = pd.to_datetime(s, errors="coerce")
-    if pd.api.types.is_datetime64tz_dtype(s):
+    if isinstance(s.dtype, DatetimeTZDtype):
         s = s.dt.tz_localize(None)
     return s
 
