@@ -7,46 +7,22 @@ Station-wise evaluation with controlled inclusion of the target station and
 optional K-neighborhood training pools.
 
 This module provides:
-- A small `RFParams` dataclass to declare RandomForest hyperparameters.
-- A single-pass, memory-lean evaluator: `evaluate_all_stations_fast`.
+- A small `RFParams` dataclass for RandomForest hyperparameters.
+- A memory-lean evaluator: `evaluate_all_stations_fast`.
 
 Design goals
 ------------
-- **One model per target station**. The model is trained either on all
-  stations except the target or on its K nearest neighbors (if provided).
-- **Controlled inclusion**. Optionally leak 1..95% of valid rows from the
-  target station into training for better local adaptation. With `0.0`, the
-  target is excluded (LOSO-like behavior).
-- **Daily metrics prioritized**. We compute daily MAE/RMSE/R² on observed
-  overlap; monthly/annual metrics are provided for completeness.
-- **Generic schema**. Column names are *parameters* (id, date, coords, altitude,
-  target), so the package does not enforce a specific naming convention.
-- **Preprocessing once**. Datetime parsing, clipping and time features are
-  computed once and reused.
-
-Typical usage
--------------
->>> from missclimatepy.evaluate import evaluate_all_stations_fast, RFParams
->>> report = evaluate_all_stations_fast(
-...     df,
-...     id_col="station", date_col="date",
-...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
-...     target_col="tmin",
-...     start="1991-01-01", end="2020-12-31",
-...     station_ids=["2038","2124","29007"],      # evaluate only these
-...     k_neighbors=20,                           # train on K neighbors of each target
-...     include_target_pct=30.0,                  # leak 30% target rows into training
-...     min_station_rows=9125,                    # require this many valid rows to score
-...     rf_params=RFParams(n_estimators=15, max_depth=30, n_jobs=-1, random_state=42),
-...     show_progress=True,
-... )
->>> report.head()
-
-Notes
------
-- Monthly/annual metrics use aggregation `agg_for_metrics` ("sum" | "mean" | "median").
-- If you pass `neighbor_map`, it overrides `k_neighbors`.
-- Memory: features and masks are built once; per-station we subset views and fit small RFs.
+- **One model per target station**. Train either on all other stations or the
+  K nearest neighbors.
+- **Controlled inclusion**. Optionally leak 1..95% of the target station’s
+  valid rows into training for local adaptation. With 0.0, the target is fully
+  excluded (LOSO-like behavior). The **test set is always the complement**
+  (100 − include_target_pct)% of the target’s valid rows → no leakage.
+- **Daily metrics prioritized**. We compute daily MAE/RMSE/R²; monthly/annual
+  metrics are provided for completeness.
+- **Generic schema**. Column names (id/date/coords/alt/target) are parameters.
+- **Preprocessing once**. Datetime parsing and time features are computed once
+  and reused across stations.
 """
 
 from __future__ import annotations
@@ -57,8 +33,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from pandas.api.types import DatetimeTZDtype
+from sklearn.metrics import mean_absolute_error as _mae
+from sklearn.metrics import mean_squared_error as _mse
+from sklearn.metrics import r2_score as _r2
 
 try:
     from tqdm.auto import tqdm  # optional progress bars
@@ -82,8 +59,7 @@ class RFParams:
     max_depth: Optional[int] = None
     min_samples_split: int = 2
     min_samples_leaf: int = 1
-    # scikit-learn >=1.2 deprecates "auto" for RandomForestRegressor
-    max_features: Union[str, int, float, None] = "sqrt"
+    max_features: Union[str, int, float, None] = None  # None ~ sklearn default
     bootstrap: bool = True
     n_jobs: int = -1
     random_state: int = 42
@@ -103,10 +79,10 @@ def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
 
 def _ensure_datetime_naive(s: pd.Series) -> pd.Series:
     s = pd.to_datetime(s, errors="coerce")
-    if isinstance(s.dtype, DatetimeTZDtype):
+    # Compatibilidad futura: evitar is_datetime64tz_dtype (deprecado)
+    if getattr(s.dtype, "tz", None) is not None:  # dtype es DatetimeTZDtype
         s = s.dt.tz_localize(None)
     return s
-
 
 def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False) -> pd.DataFrame:
     out = df.copy()
@@ -120,26 +96,20 @@ def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False
 
 
 def _safe_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """Compute MAE/RMSE/R² robustly; R² = NaN for degenerate/short cases.
-    Works with old scikit-learn (no 'squared' kw) and new versions."""
+    """Compute MAE/RMSE/R² robustly; R² = NaN for degenerate/short cases."""
     if y_true.size == 0 or y_pred.size == 0:
         return {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan}
-
-    mae = mean_absolute_error(y_true, y_pred)
-
-    # Older sklearn doesn’t accept squared=; fall back to sqrt(MSE)
+    mae = float(_mae(y_true, y_pred))
+    # use squared=False for modern sklearn; revert to sqrt if needed
     try:
-        rmse = mean_squared_error(y_true, y_pred, squared=False)  # new API
-    except TypeError:
-        rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))  # old API
-
+        rmse = float(_mse(y_true, y_pred, squared=False))
+    except TypeError:  # older sklearn
+        rmse = float(_mse(y_true, y_pred) ** 0.5)
     if y_true.size < 2 or float(np.var(y_true)) == 0.0:
         r2 = np.nan
     else:
-        r2 = r2_score(y_true, y_pred)
-
+        r2 = float(_r2(y_true, y_pred))
     return {"MAE": mae, "RMSE": rmse, "R2": r2}
-
 
 
 _FREQ_ALIAS = {"M": "ME", "A": "YE", "Y": "YE", "Q": "QE"}
@@ -298,54 +268,8 @@ def evaluate_all_stations_fast(
     """
     Evaluate one Random-Forest model per target station using either all other
     stations or only its K nearest neighbors as the training pool. Optionally
-    include 1..95% of the target station's valid rows in training.
-
-    Parameters
-    ----------
-    data : DataFrame
-        Long-format table with at least (id_col, date_col, lat_col, lon_col,
-        alt_col, target_col).
-    start, end : str or None
-        Optional inclusive window for analysis.
-    add_cyclic : bool
-        Add sin/cos seasonal features of day-of-year.
-    feature_cols : list[str] or None
-        Custom features to use. If None, defaults to coords + calendar (+cyclic).
-    prefix, station_ids, regex, custom_filter :
-        Subset of station ids to evaluate (OR semantics across filters). Training
-        always uses the full pool (except target), or K-neighbors if configured.
-    min_station_rows : int or None
-        Require at least this number of valid rows per station to compute metrics.
-    k_neighbors : int or None
-        If provided and `neighbor_map` is None, builds a KNN map and *trains each
-        target model only on its neighbors* (excluding itself), plus optionally the
-        leaked fraction of target rows.
-    neighbor_map : dict or None
-        Precomputed `{station -> [neighbors...]}`. If provided, it overrides
-        `k_neighbors`.
-    include_target_pct : float
-        Percentage (0..95) of target station valid rows to *include in training*.
-        Use 0.0 to fully exclude target (LOSO-like).
-    include_target_seed : int
-        Random seed for sampling target rows when inclusion > 0.
-    rf_params : RFParams | dict | None
-        RF hyperparameters. Missing fields fall back to defaults.
-    agg_for_metrics : {"sum","mean","median"}
-        Aggregation for monthly/annual metrics.
-    show_progress : bool
-        Print per-station progress info.
-    log_csv : str or None
-        If provided, appends progress rows every `flush_every` stations.
-    save_table_path : str or None
-        If provided, saves the final report (.csv or .parquet depending on extension).
-
-    Returns
-    -------
-    DataFrame
-        One row per evaluated station with metrics and metadata:
-        [station, n_rows, seconds, rows_train, rows_test,
-         MAE_d, RMSE_d, R2_d, MAE_m, RMSE_m, R2_m, MAE_y, RMSE_y, R2_y,
-         used_k_neighbors, include_target_pct, neighbors_ids (optional)]
+    include 1..95% of the target station's valid rows in training. The test set
+    is *always the complement* of those included rows (no leakage).
     """
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
 
@@ -417,7 +341,6 @@ def evaluate_all_stations_fast(
     elif isinstance(rf_params, RFParams):
         rf_kwargs = asdict(rf_params)
     else:
-        # dict-like; merge with defaults
         base = asdict(RFParams())
         base.update(dict(rf_params))
         rf_kwargs = base
@@ -432,11 +355,12 @@ def evaluate_all_stations_fast(
     for sid in iterator:
         t0 = pd.Timestamp.utcnow().timestamp()
 
-        # Target & test subset (valid rows only)
+        # --- Target rows (all valid for this station) ---
         is_target = (df[id_col] == sid)
-        test_mask = is_target & valid_mask_global
-        test_df = df.loc[test_mask]
-        if test_df.empty:
+        target_valid_mask = is_target & valid_mask_global
+        target_all = df.loc[target_valid_mask]
+
+        if target_all.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
                 "station": sid, "n_rows": 0, "seconds": sec,
@@ -453,37 +377,41 @@ def evaluate_all_stations_fast(
                 _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
                 pending = []
             if show_progress:
-                tqdm.write(f"Station {sid}: 0 valid test rows (skipped)")
+                tqdm.write(f"Station {sid}: 0 valid rows (skipped)")
             continue
 
-        # Training pool: all others or neighbors-only
+        # --- Training pool from neighbors (or global) EXCLUDING the target ---
         if nmap is not None:
             neigh_ids = nmap.get(sid, [])
             train_pool_mask = df[id_col].isin(neigh_ids) & (~is_target)
         else:
             train_pool_mask = ~is_target
-
         train_pool = df.loc[train_pool_mask & valid_mask_global]
 
-        # Optional controlled inclusion (sample % of target valid rows into training)
+        # --- Include X% of the target in TRAIN and use the complement as TEST ---
         pct = max(0.0, min(float(include_target_pct), 95.0))
         if pct > 0.0:
-            n_take = int(np.ceil(len(test_df) * (pct / 100.0)))
-            sample_idx = test_df.sample(n=n_take, random_state=int(include_target_seed)).index
-            train_df = pd.concat([train_pool, df.loc[sample_idx]], axis=0, copy=False)
+            n_take = int(np.ceil(len(target_all) * (pct / 100.0)))
+            sample_idx = target_all.sample(n=n_take, random_state=int(include_target_seed)).index
+            target_in_train = df.loc[sample_idx]
+            holdout_idx = target_all.index.difference(sample_idx)
+            test_df = df.loc[holdout_idx]
+            train_df = pd.concat([train_pool, target_in_train], axis=0, copy=False)
         else:
+            # LOSO-like: test uses all target rows; train excludes target
+            test_df = target_all
             train_df = train_pool
 
-        if train_df.empty:
+        if test_df.empty or train_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
-                "station": sid, "n_rows": 0, "seconds": sec,
-                "rows_train": 0, "rows_test": int(len(test_df)),
+                "station": sid, "n_rows": int(len(test_df)), "seconds": sec,
+                "rows_train": int(len(train_df)), "rows_test": int(len(test_df)),
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
                 "used_k_neighbors": used_k,
-                "include_target_pct": float(include_target_pct),
+                "include_target_pct": float(pct),
             }
             rows.append(row)
             pending.append(row)
@@ -491,24 +419,22 @@ def evaluate_all_stations_fast(
                 _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
                 pending = []
             if show_progress:
-                tqdm.write(f"Station {sid}: empty train (skipped)")
+                tqdm.write(f"Station {sid}: empty train/test after split (skipped)")
             continue
 
-        # Fit RF
+        # --- Fit RF and predict ---
         model = RandomForestRegressor(**rf_kwargs)
         X_train = train_df[feats].to_numpy(copy=False)
         y_train = train_df[target_col].to_numpy(copy=False)
-        X_test = test_df[feats].to_numpy(copy=False)
-        y_test = test_df[target_col].to_numpy(copy=False)
+        X_test  = test_df[feats].to_numpy(copy=False)
+        y_test  = test_df[target_col].to_numpy(copy=False)
 
         model.fit(X_train, y_train)
         y_hat = model.predict(X_test)
 
-        # Metrics (daily)
+        # --- Metrics ---
         pred_df = pd.DataFrame({date_col: test_df[date_col].values, "y_true": y_test, "y_pred": y_hat})
         daily = _safe_metrics(pred_df["y_true"].values, pred_df["y_pred"].values)
-
-        # Optional aggregates (monthly/annual) for completeness
         monthly, _ = _aggregate_and_score(pred_df, date_col=date_col, y_col="y_true", yhat_col="y_pred", freq="M",  agg=agg_for_metrics)
         annual,  _ = _aggregate_and_score(pred_df, date_col=date_col, y_col="y_true", yhat_col="y_pred", freq="YE", agg=agg_for_metrics)
 
@@ -521,7 +447,7 @@ def evaluate_all_stations_fast(
             "rows_test": int(len(test_df)),
             "MAE_d": float(daily["MAE"]),
             "RMSE_d": float(daily["RMSE"]),
-            "R2_d": float(daily["R2"]) if daily["R2"] == daily["R2"] else np.nan,  # pass NaN
+            "R2_d": float(daily["R2"]) if daily["R2"] == daily["R2"] else np.nan,
             "MAE_m": float(monthly["MAE"]),
             "RMSE_m": float(monthly["RMSE"]),
             "R2_m": float(monthly["R2"]) if monthly["R2"] == monthly["R2"] else np.nan,
@@ -560,7 +486,6 @@ def evaluate_all_stations_fast(
         elif ext.endswith(".parquet"):
             report.to_parquet(save_table_path, index=False, compression=parquet_compression)
         else:
-            # default to CSV
             report.to_csv(save_table_path, index=False)
 
     # Sort by daily RMSE (ascending) for convenience
@@ -574,3 +499,4 @@ __all__ = [
     "RFParams",
     "evaluate_all_stations_fast",
 ]
+
