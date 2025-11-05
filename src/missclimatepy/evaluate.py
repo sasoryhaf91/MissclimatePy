@@ -3,63 +3,83 @@
 missclimatepy.evaluate
 ======================
 
-Station-wise evaluation with controlled inclusion of the target station and
-optional K-neighborhood training pools.
+Station-wise evaluation with *one model per target station*, trained either on:
+  • ALL other stations (global pool), or
+  • ONLY its K nearest neighbors (geodesic/Haversine centroids),
 
-This module provides:
-- A small `RFParams` dataclass for RandomForest hyperparameters.
-- A memory-lean evaluator: `evaluate_all_stations_fast`.
+and with *controlled inclusion* of a sampled fraction (1..95%) of rows from the
+target station into training (0% ≈ LOSO-like).
 
 Design goals
 ------------
-- **One model per target station**. Train either on all other stations or the
-  K nearest neighbors.
-- **Controlled inclusion**. Optionally leak 1..95% of the target station’s
-  valid rows into training for local adaptation. With 0.0, the target is fully
-  excluded (LOSO-like behavior). The **test set is always the complement**
-  (100 − include_target_pct)% of the target’s valid rows → no leakage.
-- **Daily metrics prioritized**. We compute daily MAE/RMSE/R²; monthly/annual
-  metrics are provided for completeness.
-- **Generic schema**. Column names (id/date/coords/alt/target) are parameters.
-- **Preprocessing once**. Datetime parsing and time features are computed once
-  and reused across stations.
+- Generic schema: all column names are user-provided (id/date/lat/lon/alt/target).
+- Memory-lean: single-pass preprocessing; per-station we slice views and train a
+  small RandomForest.
+- Daily metrics prioritized (MAE/RMSE/R² on overlapping valid days); monthly/annual
+  optional aggregates for completeness.
+- Robust neighbors: use sklearn BallTree(metric="haversine") over 2D radians;
+  if unavailable or shape errors arise, we fallback to an O(n²) Haversine routine.
+
+Typical usage
+-------------
+>>> from missclimatepy.evaluate import evaluate_all_stations_fast, RFParams
+>>> rep = evaluate_all_stations_fast(
+...     df,
+...     id_col="station", date_col="date",
+...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
+...     target_col="tmin",
+...     start="1991-01-01", end="2020-12-31",
+...     k_neighbors=20, include_target_pct=20.0,
+...     rf_params=RFParams(n_estimators=100, max_depth=30, n_jobs=-1, random_state=42),
+...     min_station_rows=9125, show_progress=True
+... )
+>>> rep.head()
+
+Notes
+-----
+- Monthly/annual metrics use aggregation `agg_for_metrics` in {"sum","mean","median"}.
+- If you pass `neighbor_map`, it overrides building neighbors from K.
+- To evaluate a subset of stations, use `station_ids`, `prefix`, `regex` or `custom_filter`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union, Callable
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error as _mae
-from sklearn.metrics import mean_squared_error as _mse
-from sklearn.metrics import r2_score as _r2
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 try:
-    from tqdm.auto import tqdm  # optional progress bars
+    from tqdm.auto import tqdm  # nice progress bars if available
 except Exception:  # pragma: no cover
     def tqdm(x, **kwargs):
-        return x  # fallback: transparent iterator
+        return x
 
-# Local neighbor utilities
-from .neighbors import neighbor_distances
+# local fallback haversine (pairwise) used only if BallTree path not available
+from .neighbors import neighbor_distances  # lightweight import for fallback only
 
 StationId = Union[str, int]
 
 
 # --------------------------------------------------------------------------- #
-# Public hyperparameters container
+# RandomForest hyperparameters container
 # --------------------------------------------------------------------------- #
 @dataclass
 class RFParams:
-    """Typed RF hyperparameters for convenience (all optional)."""
+    """
+    Convenience typed container for RandomForestRegressor hyperparameters.
+
+    IMPORTANT: `max_features="auto"` is deprecated in sklearn>=1.4 for regressors.
+    Use None (default) or "sqrt"/"log2" explicitly.
+    """
     n_estimators: int = 100
     max_depth: Optional[int] = None
     min_samples_split: int = 2
     min_samples_leaf: int = 1
-    max_features: Union[str, int, float, None] = None  # None ~ sklearn default
+    max_features: Union[str, int, float, None] = None  # safe default for modern sklearn
     bootstrap: bool = True
     n_jobs: int = -1
     random_state: int = 42
@@ -71,18 +91,16 @@ class RFParams:
 def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
     missing = [c for c in cols if c not in df.columns]
     if missing:
-        raise ValueError(
-            f"Missing required columns: {missing}. "
-            f"Available: {list(df.columns)[:10]}..."
-        )
+        raise ValueError(f"Missing required columns: {missing}")
 
 
 def _ensure_datetime_naive(s: pd.Series) -> pd.Series:
     s = pd.to_datetime(s, errors="coerce")
-    # Compatibilidad futura: evitar is_datetime64tz_dtype (deprecado)
-    if getattr(s.dtype, "tz", None) is not None:  # dtype es DatetimeTZDtype
+    # handle tz-aware series without using deprecated check
+    if isinstance(getattr(s, "dtype", None), pd.DatetimeTZDtype):  # type: ignore[attr-defined]
         s = s.dt.tz_localize(None)
     return s
+
 
 def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False) -> pd.DataFrame:
     out = df.copy()
@@ -96,21 +114,23 @@ def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False
 
 
 def _safe_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """Compute MAE/RMSE/R² robustly; R² = NaN for degenerate/short cases."""
+    """Compute MAE/RMSE/R² robustly; R² = NaN for degenerate/short cases.
+       RMSE is computed as sqrt(MSE) to avoid using the 'squared' argument,
+       which isn’t available in some sklearn versions used by the tests.
+    """
     if y_true.size == 0 or y_pred.size == 0:
         return {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan}
-    mae = float(_mae(y_true, y_pred))
-    # use squared=False for modern sklearn; revert to sqrt if needed
-    try:
-        rmse = float(_mse(y_true, y_pred, squared=False))
-    except TypeError:  # older sklearn
-        rmse = float(_mse(y_true, y_pred) ** 0.5)
+
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)   # <-- no 'squared' kwarg
+    rmse = float(mse) ** 0.5
+
     if y_true.size < 2 or float(np.var(y_true)) == 0.0:
         r2 = np.nan
     else:
-        r2 = float(_r2(y_true, y_pred))
-    return {"MAE": mae, "RMSE": rmse, "R2": r2}
+        r2 = r2_score(y_true, y_pred)
 
+    return {"MAE": float(mae), "RMSE": float(rmse), "R2": float(r2) if r2 == r2 else np.nan}
 
 _FREQ_ALIAS = {"M": "ME", "A": "YE", "Y": "YE", "Q": "QE"}
 
@@ -124,10 +144,7 @@ def _aggregate_and_score(
     freq: str = "M",
     agg: str = "sum",
 ) -> Tuple[Dict[str, float], pd.DataFrame]:
-    """
-    Aggregate to a given frequency and score on the overlap.
-    Returns (metrics_dict, aggregated_dataframe).
-    """
+    """Aggregate to a given frequency and score on the overlap."""
     freq = _FREQ_ALIAS.get(freq, freq)
     op = {"sum": "sum", "mean": "mean", "median": "median"}[agg]
 
@@ -159,7 +176,7 @@ def _preprocess_once(
     feature_cols: Optional[Sequence[str]],
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Single-pass preprocessing: datetime, optional clipping, time features,
+    Single-pass preprocessing: date parsing, window clipping, time features,
     and feature list assembly. Returns (prepared_df, features_list).
     """
     df = data.copy()
@@ -185,34 +202,83 @@ def _preprocess_once(
     return df, feats
 
 
-def _build_neighbor_map_from_centroids(
-    df: pd.DataFrame,
+def _build_neighbors_callable(
+    work: pd.DataFrame,
     *,
     id_col: str,
     lat_col: str,
     lon_col: str,
-    k: int,
-    include_self: bool = False,
-) -> Dict[StationId, List[StationId]]:
+    k_neighbors: Optional[int],
+) -> Tuple[Callable[[StationId, int], List[StationId]], Optional[int]]:
     """
-    Construct a neighbor map {station -> [neighbors...]} using Haversine KNN
-    over per-station (median) centroids.
+    Return a function `neighbors_of(label, k)` that yields up to k nearest neighbor
+    station ids (excluding itself) using Haversine over per-station centroids.
+
+    Primary path: BallTree(metric="haversine") with input shape (n,2) in radians.
+    Fallback path: O(n²) Haversine via `neighbor_distances`.
     """
-    centroids = (
-        df.groupby(id_col)[[lat_col, lon_col]]
+    if (k_neighbors is None) or (int(k_neighbors) <= 0):
+        def _no_neighbors(_: StationId, __: int) -> List[StationId]:
+            return []
+        return _no_neighbors, None
+
+    k = int(k_neighbors)
+
+    # Centroids by station
+    cent_tab = (
+        work.groupby(id_col, observed=False)[[lat_col, lon_col]]
         .median()
         .reset_index()
-        .rename(columns={id_col: "station", lat_col: "latitude", lon_col: "longitude"})
     )
-    tbl = neighbor_distances(
-        stations=centroids,
-        k_neighbors=k,
-        include_self=include_self,
-    )
-    nmap: Dict[StationId, List[StationId]] = {}
-    for st, sub in tbl.groupby("station"):
-        nmap[st] = sub.sort_values("rank")["neighbor"].tolist()
-    return nmap
+
+    # radians (strict 1-D arrays) -> stack to (n, 2)
+    cent_lat = np.deg2rad(cent_tab[lat_col].to_numpy(dtype=np.float64, copy=False)).ravel()
+    cent_lon = np.deg2rad(cent_tab[lon_col].to_numpy(dtype=np.float64, copy=False)).ravel()
+    cent_mat = np.column_stack((cent_lat, cent_lon))  # (n, 2)
+
+    # Try BallTree; fallback to O(n²) Haversine
+    try:
+        from sklearn.neighbors import BallTree
+        tree = BallTree(cent_mat, metric="haversine")
+        label_to_pos: Dict[StationId, int] = {cent_tab.iloc[i][id_col]: int(i) for i in range(len(cent_tab))}
+
+        def neighbors_of(label: StationId, kk: int) -> List[StationId]:
+            if (kk or 0) <= 0:
+                return []
+            pos = label_to_pos.get(label, None)
+            if pos is None:
+                return []
+            # query k+1 and drop self
+            qk = min(int(kk) + 1, len(cent_tab))
+            _, idxs = tree.query(cent_mat[pos].reshape(1, -1), k=qk)
+            out: List[StationId] = []
+            for j in idxs[0].tolist():
+                lab = cent_tab.iloc[j][id_col]
+                if lab != label:
+                    out.append(lab)
+                if len(out) >= kk:
+                    break
+            return out
+
+        return neighbors_of, k
+
+    except Exception:
+        # Fallback robusto con O(n²) Haversine
+        centroids_df = cent_tab.rename(columns={id_col: "station", lat_col: "latitude", lon_col: "longitude"})
+        tbl = neighbor_distances(
+            stations=centroids_df[["station", "latitude", "longitude"]],
+            k_neighbors=k,
+            include_self=False,
+        )
+        nmap: Dict[StationId, List[StationId]] = {
+            st: sub.sort_values("rank")["neighbor"].tolist()
+            for st, sub in tbl.groupby("station")
+        }
+
+        def neighbors_of(label: StationId, kk: int) -> List[StationId]:
+            return nmap.get(label, [])[: (kk or 0)]
+
+        return neighbors_of, k
 
 
 def _append_rows_to_csv(rows: List[Dict], path: str, *, header_written_flag: Dict[str, bool]) -> None:
@@ -247,7 +313,7 @@ def evaluate_all_stations_fast(
     prefix: Optional[Iterable[str]] = None,
     station_ids: Optional[Iterable[StationId]] = None,
     regex: Optional[str] = None,
-    custom_filter: Optional[callable] = None,
+    custom_filter: Optional[Callable[[StationId], bool]] = None,
     min_station_rows: Optional[int] = None,
     # neighborhood & leakage
     k_neighbors: Optional[int] = 20,
@@ -256,7 +322,7 @@ def evaluate_all_stations_fast(
     include_target_seed: int = 42,
     # model & metrics
     rf_params: Optional[Union[RFParams, Dict]] = None,
-    agg_for_metrics: str = "sum",
+    agg_for_metrics: str = "sum",          # for M/Y aggregates
     # logging / UX
     show_progress: bool = False,
     log_csv: Optional[str] = None,
@@ -269,10 +335,12 @@ def evaluate_all_stations_fast(
     Evaluate one Random-Forest model per target station using either all other
     stations or only its K nearest neighbors as the training pool. Optionally
     include 1..95% of the target station's valid rows in training.
+
+    Returns a DataFrame with one row per station: counts, timing, and metrics.
     """
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
 
-    # 1) Preprocesado único
+    # 1) Preprocess once (datetime, clip, time features, features list)
     df, feats = _preprocess_once(
         data,
         id_col=id_col, date_col=date_col,
@@ -283,11 +351,10 @@ def evaluate_all_stations_fast(
         feature_cols=feature_cols,
     )
 
-    # 2) Máscaras de validez
+    # 2) Mask de filas válidas (todas las features + target sin NaN)
     valid_mask_global = ~df[feats + [target_col]].isna().any(axis=1)
-    df_valid = df.loc[valid_mask_global]   # se usará para train/test
 
-    # 3) Conjunto de estaciones a evaluar
+    # 3) Determinar estaciones a evaluar
     all_ids = df[id_col].dropna().unique().tolist()
     chosen: List[StationId] = []
 
@@ -311,44 +378,33 @@ def evaluate_all_stations_fast(
     if not chosen:
         chosen = all_ids
 
-    # únicos, orden estable
+    # Unique y orden estable
     seen = set()
     stations = [s for s in chosen if not (s in seen or seen.add(s))]
 
-    # 4) Filtro por mínimo de filas válidas (contadas sobre df_valid)
+    # 4) Filtro por mínimo de filas válidas por estación para *testeo*
     if min_station_rows is not None:
-        valid_counts = df_valid[[id_col]].groupby(id_col).size().astype(int)
+        valid_counts = df.loc[valid_mask_global, [id_col]].groupby(id_col).size().astype(int)
         before = len(stations)
         stations = [s for s in stations if int(valid_counts.get(s, 0)) >= int(min_station_rows)]
         if show_progress and before != len(stations):
             tqdm.write(f"Filtered by min_station_rows={min_station_rows}: {before} → {len(stations)} stations")
 
-    # 5) Neighbor map (si no nos lo pasan)
+    # 5) Vecinos
+    used_k: Optional[int] = None
     if neighbor_map is not None:
-        nmap = neighbor_map
-        used_k = None
-    elif k_neighbors is not None:
-        # Centroides por estación calculados en df_valid (coordenadas medianas)
-        centroids = (
-            df_valid.groupby(id_col)[[lat_col, lon_col]]
-            .median()
-            .reset_index()
-            .rename(columns={id_col: "station", lat_col: "latitude", lon_col: "longitude"})
-        )
-        tbl = neighbor_distances(
-            stations=centroids,
-            k_neighbors=int(k_neighbors),
-            include_self=False,  # importante: excluirse a sí misma del vecindario
-        )
-        nmap: Dict[StationId, List[StationId]] = {}
-        for st, sub in tbl.groupby("station"):
-            nmap[st] = sub.sort_values("rank")["neighbor"].tolist()
-        used_k = int(k_neighbors)
+        # usuario provee vecinos arbitrarios
+        def neighbors_of(label: StationId, kk: int) -> List[StationId]:
+            lst = neighbor_map.get(label, [])
+            return lst[: (kk or len(lst))]
     else:
-        nmap = None
-        used_k = None
+        neighbors_of, used_k = _build_neighbors_callable(
+            work=df[[id_col, lat_col, lon_col]],
+            id_col=id_col, lat_col=lat_col, lon_col=lon_col,
+            k_neighbors=k_neighbors,
+        )
 
-    # 6) RF params
+    # 6) RF params (dict o dataclass)
     if rf_params is None:
         rf_kwargs = asdict(RFParams())
     elif isinstance(rf_params, RFParams):
@@ -358,21 +414,20 @@ def evaluate_all_stations_fast(
         base.update(dict(rf_params))
         rf_kwargs = base
 
-    # 7) Iteración por estación objetivo
+    # 7) Loop por estación
     header_flag: Dict[str, bool] = {}
     pending: List[Dict] = []
     rows: List[Dict] = []
-    iterator = tqdm(stations, desc="Evaluating stations", unit="st") if show_progress else stations
 
-    # porcentaje incluido acotado
-    pct = max(0.0, min(float(include_target_pct), 95.0))
-    rng = np.random.default_rng(int(include_target_seed))
+    iterator = tqdm(stations, desc="Evaluating stations", unit="st") if show_progress else stations
 
     for sid in iterator:
         t0 = pd.Timestamp.utcnow().timestamp()
 
-        # Test = TODAS las filas válidas de la estación objetivo (df_valid)
-        test_df = df_valid.loc[df_valid[id_col] == sid]
+        # Test = todas las filas válidas de la estación objetivo (overlap observed)
+        is_target = (df[id_col] == sid)
+        test_mask = is_target & valid_mask_global
+        test_df = df.loc[test_mask]
         if test_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
@@ -381,7 +436,8 @@ def evaluate_all_stations_fast(
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
-                "used_k_neighbors": used_k, "include_target_pct": float(pct),
+                "used_k_neighbors": used_k,
+                "include_target_pct": float(include_target_pct),
             }
             rows.append(row)
             pending.append(row)
@@ -392,28 +448,23 @@ def evaluate_all_stations_fast(
                 tqdm.write(f"Station {sid}: 0 valid test rows (skipped)")
             continue
 
-        # Pool de vecinos: SOLO vecinas (si nmap) o todas las otras estaciones válidas
-        if nmap is not None:
-            neigh_ids = nmap.get(sid, [])
-            # Si no hay vecinos (caso borde), hacemos fallback a "todas excepto target"
-            if neigh_ids:
-                train_pool = df_valid.loc[df_valid[id_col].isin(neigh_ids)]
-            else:
-                train_pool = df_valid.loc[df_valid[id_col] != sid]
+        # Pool de entrenamiento: K vecinos (si se pidió), excluyendo self
+        if k_neighbors is not None or neighbor_map is not None:
+            neigh_ids = neighbors_of(sid, used_k or k_neighbors or 0)
+            train_pool_mask = df[id_col].isin(neigh_ids) & (~is_target)
         else:
-            train_pool = df_valid.loc[df_valid[id_col] != sid]
+            train_pool_mask = ~is_target  # global
 
-        # Inclusión controlada: % de filas de la propia estación objetivo
-        if pct > 0:
+        train_pool = df.loc[train_pool_mask & valid_mask_global]
+
+        # Inclusión controlada de la estación objetivo
+        pct = max(0.0, min(float(include_target_pct), 95.0))
+        if pct > 0.0:
             n_take = int(np.ceil(len(test_df) * (pct / 100.0)))
-            # muestreo reproducible desde el índice del test_df
-            sample_idx = rng.choice(test_df.index.to_numpy(), size=n_take, replace=False)
-            train_df = pd.concat([train_pool, df_valid.loc[sample_idx]], axis=0, copy=False)
+            sample_idx = test_df.sample(n=n_take, random_state=int(include_target_seed)).index
+            train_df = pd.concat([train_pool, df.loc[sample_idx]], axis=0, copy=False)
         else:
             train_df = train_pool
-
-        # (opcional) quitar duplicados exactos por índice para evitar doble conteo
-        train_df = train_df.loc[~train_df.index.duplicated(keep="first")]
 
         if train_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
@@ -423,7 +474,8 @@ def evaluate_all_stations_fast(
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
-                "used_k_neighbors": used_k, "include_target_pct": float(pct),
+                "used_k_neighbors": used_k,
+                "include_target_pct": float(pct),
             }
             rows.append(row)
             pending.append(row)
@@ -434,7 +486,7 @@ def evaluate_all_stations_fast(
                 tqdm.write(f"Station {sid}: empty train (skipped)")
             continue
 
-        # Fit RF
+        # Fit RF & predict
         model = RandomForestRegressor(**rf_kwargs)
         X_train = train_df[feats].to_numpy(copy=False)
         y_train = train_df[target_col].to_numpy(copy=False)
@@ -444,9 +496,11 @@ def evaluate_all_stations_fast(
         model.fit(X_train, y_train)
         y_hat = model.predict(X_test)
 
-        # Métricas
+        # Métricas diarias
         pred_df = pd.DataFrame({date_col: test_df[date_col].values, "y_true": y_test, "y_pred": y_hat})
         daily = _safe_metrics(pred_df["y_true"].values, pred_df["y_pred"].values)
+
+        # Agregados opcionales mensual/anual
         monthly, _ = _aggregate_and_score(pred_df, date_col=date_col, y_col="y_true", yhat_col="y_pred", freq="M",  agg=agg_for_metrics)
         annual,  _ = _aggregate_and_score(pred_df, date_col=date_col, y_col="y_true", yhat_col="y_pred", freq="YE", agg=agg_for_metrics)
 
@@ -483,11 +537,14 @@ def evaluate_all_stations_fast(
                 f"MAE_d={daily['MAE']:.3f} RMSE_d={daily['RMSE']:.3f} R2_d={daily['R2']:.3f}"
             )
 
-    # Flush y reporte final
+    # Flush pending progress lines
     if log_csv and pending:
         _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
 
+    # Final report
     report = pd.DataFrame(rows)
+
+    # Optional save
     if save_table_path:
         ext = str(save_table_path).lower()
         if ext.endswith(".csv"):
@@ -497,13 +554,14 @@ def evaluate_all_stations_fast(
         else:
             report.to_csv(save_table_path, index=False)
 
+    # Orden conveniente
     if not report.empty and "RMSE_d" in report.columns:
         report = report.sort_values("RMSE_d", ascending=True).reset_index(drop=True)
 
     return report
 
+
 __all__ = [
     "RFParams",
     "evaluate_all_stations_fast",
 ]
-
