@@ -101,18 +101,25 @@ def gap_profile_by_station(
 
     def _gaps(sub: pd.DataFrame) -> Dict[str, float]:
         sub = sub.sort_values(date_col)
-        # flag valid rows
-        v = sub[target_col].notna().to_numpy()
-        # build daily index to detect day-to-day runs
-        # (reindex to consecutive days)
+        if sub.empty:
+            return {"longest_gap": 0, "n_gaps": 0, "mean_gap": 0.0}
+
+        # build consecutive daily index so gaps are explicit
         full_idx = pd.date_range(sub[date_col].min(), sub[date_col].max(), freq="D")
         full = pd.DataFrame(index=full_idx)
-        full["valid"] = False
-        full.loc[sub[date_col].values, "valid"] = v
-        # gaps are where valid==False in runs
-        runs = (full["valid"] != full["valid"].shift()).cumsum()
-        groups = full.groupby([runs, "valid"]).size().reset_index(name="len")
-        gaps = groups[groups["valid"] == False]["len"]  # noqa: E712
+        full["is_valid"] = False
+        # mark valid days
+        full.loc[sub[date_col].values, "is_valid"] = sub[target_col].notna().to_numpy()
+
+        # run-length encode on the validity flag
+        run_id = (full["is_valid"] != full["is_valid"].shift()).cumsum()
+        # use as_index=False to avoid reset_index() name collisions
+        groups = (
+            full.assign(run_id=run_id)
+                .groupby(["run_id", "is_valid"], as_index=False)
+                .size()
+        )
+        gaps = groups.loc[groups["is_valid"] == False, "size"]  # noqa: E712
         if gaps.empty:
             return {"longest_gap": 0, "n_gaps": 0, "mean_gap": 0.0}
         return {
@@ -123,10 +130,10 @@ def gap_profile_by_station(
 
     out = (
         work.groupby(id_col, group_keys=False)
-        .apply(_gaps)
-        .apply(pd.Series)
-        .reset_index()
-        .rename(columns={id_col: "station"})
+            .apply(_gaps)
+            .apply(pd.Series)
+            .reset_index()
+            .rename(columns={id_col: "station"})
     )
     return out
 

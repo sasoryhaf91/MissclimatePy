@@ -338,7 +338,7 @@ def evaluate_all_stations_fast(
     # Precompute per-station median coordinates for (x,y,z)
     med_coords = (
         df.groupby(id_col)[[lat_col, lon_col, alt_col]].median().rename(
-            columns={lat_col: "x", lon_col: "y", alt_col: "z"}
+            columns={lat_col: "y", lon_col: "x", alt_col: "z"}
         )
     )
 
