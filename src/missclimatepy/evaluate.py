@@ -268,12 +268,11 @@ def evaluate_all_stations_fast(
     """
     Evaluate one Random-Forest model per target station using either all other
     stations or only its K nearest neighbors as the training pool. Optionally
-    include 1..95% of the target station's valid rows in training. The test set
-    is *always the complement* of those included rows (no leakage).
+    include 1..95% of the target station's valid rows in training.
     """
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
 
-    # 1) Preprocess once (datetime, clip, time features, features list)
+    # 1) Preprocesado único
     df, feats = _preprocess_once(
         data,
         id_col=id_col, date_col=date_col,
@@ -284,10 +283,11 @@ def evaluate_all_stations_fast(
         feature_cols=feature_cols,
     )
 
-    # 2) Global valid mask for features+target (used to speed-up per-station slices)
+    # 2) Máscaras de validez
     valid_mask_global = ~df[feats + [target_col]].isna().any(axis=1)
+    df_valid = df.loc[valid_mask_global]   # se usará para train/test
 
-    # 3) Determine stations to evaluate (OR over filters; default = all)
+    # 3) Conjunto de estaciones a evaluar
     all_ids = df[id_col].dropna().unique().tolist()
     chosen: List[StationId] = []
 
@@ -311,31 +311,44 @@ def evaluate_all_stations_fast(
     if not chosen:
         chosen = all_ids
 
-    # Keep unique & stable order
+    # únicos, orden estable
     seen = set()
     stations = [s for s in chosen if not (s in seen or seen.add(s))]
 
-    # 4) Optional minimum rows filter (counted on valid rows)
+    # 4) Filtro por mínimo de filas válidas (contadas sobre df_valid)
     if min_station_rows is not None:
-        valid_counts = df.loc[valid_mask_global, [id_col]].groupby(id_col).size().astype(int)
+        valid_counts = df_valid[[id_col]].groupby(id_col).size().astype(int)
         before = len(stations)
         stations = [s for s in stations if int(valid_counts.get(s, 0)) >= int(min_station_rows)]
         if show_progress and before != len(stations):
             tqdm.write(f"Filtered by min_station_rows={min_station_rows}: {before} → {len(stations)} stations")
 
-    # 5) Neighbor map
-    used_k = None
+    # 5) Neighbor map (si no nos lo pasan)
     if neighbor_map is not None:
         nmap = neighbor_map
-        used_k = None  # user-provided list lengths may vary
+        used_k = None
     elif k_neighbors is not None:
-        nmap = _build_neighbor_map_from_centroids(df, id_col=id_col, lat_col=lat_col, lon_col=lon_col, k=int(k_neighbors))
+        # Centroides por estación calculados en df_valid (coordenadas medianas)
+        centroids = (
+            df_valid.groupby(id_col)[[lat_col, lon_col]]
+            .median()
+            .reset_index()
+            .rename(columns={id_col: "station", lat_col: "latitude", lon_col: "longitude"})
+        )
+        tbl = neighbor_distances(
+            stations=centroids,
+            k_neighbors=int(k_neighbors),
+            include_self=False,  # importante: excluirse a sí misma del vecindario
+        )
+        nmap: Dict[StationId, List[StationId]] = {}
+        for st, sub in tbl.groupby("station"):
+            nmap[st] = sub.sort_values("rank")["neighbor"].tolist()
         used_k = int(k_neighbors)
     else:
         nmap = None
         used_k = None
 
-    # 6) RF params (dict or dataclass)
+    # 6) RF params
     if rf_params is None:
         rf_kwargs = asdict(RFParams())
     elif isinstance(rf_params, RFParams):
@@ -345,22 +358,22 @@ def evaluate_all_stations_fast(
         base.update(dict(rf_params))
         rf_kwargs = base
 
-    # 7) Iterate over stations and fit/predict
+    # 7) Iteración por estación objetivo
     header_flag: Dict[str, bool] = {}
     pending: List[Dict] = []
     rows: List[Dict] = []
-
     iterator = tqdm(stations, desc="Evaluating stations", unit="st") if show_progress else stations
+
+    # porcentaje incluido acotado
+    pct = max(0.0, min(float(include_target_pct), 95.0))
+    rng = np.random.default_rng(int(include_target_seed))
 
     for sid in iterator:
         t0 = pd.Timestamp.utcnow().timestamp()
 
-        # --- Target rows (all valid for this station) ---
-        is_target = (df[id_col] == sid)
-        target_valid_mask = is_target & valid_mask_global
-        target_all = df.loc[target_valid_mask]
-
-        if target_all.empty:
+        # Test = TODAS las filas válidas de la estación objetivo (df_valid)
+        test_df = df_valid.loc[df_valid[id_col] == sid]
+        if test_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
                 "station": sid, "n_rows": 0, "seconds": sec,
@@ -368,8 +381,7 @@ def evaluate_all_stations_fast(
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
-                "used_k_neighbors": used_k,
-                "include_target_pct": float(include_target_pct),
+                "used_k_neighbors": used_k, "include_target_pct": float(pct),
             }
             rows.append(row)
             pending.append(row)
@@ -377,41 +389,41 @@ def evaluate_all_stations_fast(
                 _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
                 pending = []
             if show_progress:
-                tqdm.write(f"Station {sid}: 0 valid rows (skipped)")
+                tqdm.write(f"Station {sid}: 0 valid test rows (skipped)")
             continue
 
-        # --- Training pool from neighbors (or global) EXCLUDING the target ---
+        # Pool de vecinos: SOLO vecinas (si nmap) o todas las otras estaciones válidas
         if nmap is not None:
             neigh_ids = nmap.get(sid, [])
-            train_pool_mask = df[id_col].isin(neigh_ids) & (~is_target)
+            # Si no hay vecinos (caso borde), hacemos fallback a "todas excepto target"
+            if neigh_ids:
+                train_pool = df_valid.loc[df_valid[id_col].isin(neigh_ids)]
+            else:
+                train_pool = df_valid.loc[df_valid[id_col] != sid]
         else:
-            train_pool_mask = ~is_target
-        train_pool = df.loc[train_pool_mask & valid_mask_global]
+            train_pool = df_valid.loc[df_valid[id_col] != sid]
 
-        # --- Include X% of the target in TRAIN and use the complement as TEST ---
-        pct = max(0.0, min(float(include_target_pct), 95.0))
-        if pct > 0.0:
-            n_take = int(np.ceil(len(target_all) * (pct / 100.0)))
-            sample_idx = target_all.sample(n=n_take, random_state=int(include_target_seed)).index
-            target_in_train = df.loc[sample_idx]
-            holdout_idx = target_all.index.difference(sample_idx)
-            test_df = df.loc[holdout_idx]
-            train_df = pd.concat([train_pool, target_in_train], axis=0, copy=False)
+        # Inclusión controlada: % de filas de la propia estación objetivo
+        if pct > 0:
+            n_take = int(np.ceil(len(test_df) * (pct / 100.0)))
+            # muestreo reproducible desde el índice del test_df
+            sample_idx = rng.choice(test_df.index.to_numpy(), size=n_take, replace=False)
+            train_df = pd.concat([train_pool, df_valid.loc[sample_idx]], axis=0, copy=False)
         else:
-            # LOSO-like: test uses all target rows; train excludes target
-            test_df = target_all
             train_df = train_pool
 
-        if test_df.empty or train_df.empty:
+        # (opcional) quitar duplicados exactos por índice para evitar doble conteo
+        train_df = train_df.loc[~train_df.index.duplicated(keep="first")]
+
+        if train_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
-                "station": sid, "n_rows": int(len(test_df)), "seconds": sec,
-                "rows_train": int(len(train_df)), "rows_test": int(len(test_df)),
+                "station": sid, "n_rows": 0, "seconds": sec,
+                "rows_train": 0, "rows_test": int(len(test_df)),
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
-                "used_k_neighbors": used_k,
-                "include_target_pct": float(pct),
+                "used_k_neighbors": used_k, "include_target_pct": float(pct),
             }
             rows.append(row)
             pending.append(row)
@@ -419,10 +431,10 @@ def evaluate_all_stations_fast(
                 _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
                 pending = []
             if show_progress:
-                tqdm.write(f"Station {sid}: empty train/test after split (skipped)")
+                tqdm.write(f"Station {sid}: empty train (skipped)")
             continue
 
-        # --- Fit RF and predict ---
+        # Fit RF
         model = RandomForestRegressor(**rf_kwargs)
         X_train = train_df[feats].to_numpy(copy=False)
         y_train = train_df[target_col].to_numpy(copy=False)
@@ -432,7 +444,7 @@ def evaluate_all_stations_fast(
         model.fit(X_train, y_train)
         y_hat = model.predict(X_test)
 
-        # --- Metrics ---
+        # Métricas
         pred_df = pd.DataFrame({date_col: test_df[date_col].values, "y_true": y_test, "y_pred": y_hat})
         daily = _safe_metrics(pred_df["y_true"].values, pred_df["y_pred"].values)
         monthly, _ = _aggregate_and_score(pred_df, date_col=date_col, y_col="y_true", yhat_col="y_pred", freq="M",  agg=agg_for_metrics)
@@ -471,14 +483,11 @@ def evaluate_all_stations_fast(
                 f"MAE_d={daily['MAE']:.3f} RMSE_d={daily['RMSE']:.3f} R2_d={daily['R2']:.3f}"
             )
 
-    # Flush pending progress lines
+    # Flush y reporte final
     if log_csv and pending:
         _append_rows_to_csv(pending, log_csv, header_written_flag=header_flag)
 
-    # Final report
     report = pd.DataFrame(rows)
-
-    # Optional save
     if save_table_path:
         ext = str(save_table_path).lower()
         if ext.endswith(".csv"):
@@ -488,12 +497,10 @@ def evaluate_all_stations_fast(
         else:
             report.to_csv(save_table_path, index=False)
 
-    # Sort by daily RMSE (ascending) for convenience
     if not report.empty and "RMSE_d" in report.columns:
         report = report.sort_values("RMSE_d", ascending=True).reset_index(drop=True)
 
     return report
-
 
 __all__ = [
     "RFParams",
