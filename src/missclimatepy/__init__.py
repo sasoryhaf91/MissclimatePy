@@ -1,36 +1,77 @@
-# SPDX-License-Identifier: MIT
+# src/missclimatepy/__init__.py
 """
 missclimatepy
 =============
 
-A lightweight, reproducible toolkit for imputing gaps in daily
-climatological time series using spatial coordinates (lat, lon, altitude)
-and calendar features. The package exposes:
+Minimal and reproducible framework for climate data imputation using only
+spatial coordinates (latitude, longitude, altitude) and calendar features.
 
-- `MissClimateImputer`: a simple high-level API to impute a single target
-  variable (e.g., precipitation, tmin, tmax, evaporation) in long-format data.
-- `evaluate_all_stations_fast`: station-wise evaluation that trains one model
-  per station using either all other stations or only its K nearest neighbors,
-  with optional controlled inclusion (1–95%) of the target station rows.
-- `RFParams`: a small dataclass for RandomForest hyperparameters.
-
-The package is column-name agnostic: you pass your own column names for
-station id, date, latitude, longitude, altitude, and target.
+Public API
+----------
+- MissClimateImputer : High-level imputer class for fitting and imputing gaps.
+- RFParams           : Dataclass carrying RandomForest hyperparameters.
+- evaluate_stations  : Station-wise evaluation using k-nearest neighbors and
+                       optional controlled inclusion of target data.
+- __version__        : Package version string.
 
 Example
 -------
->>> from missclimatepy import MissClimateImputer, evaluate_all_stations_fast, RFParams
->>> # See README or quickstart for full examples.
+>>> import pandas as pd
+>>> from missclimatepy import MissClimateImputer, evaluate_stations, RFParams
+>>>
+>>> df = pd.DataFrame({
+...     "station": ["S001"]*3 + ["S002"]*3,
+...     "date": pd.to_datetime(["1991-01-01","1991-01-02","1991-01-03"]*2),
+...     "latitude": [19.5]*6,
+...     "longitude": [-99.1]*6,
+...     "altitude": [2300]*6,
+...     "tmin": [8.0, None, 7.5, 9.0, None, 8.2],
+... })
+>>>
+>>> imp = MissClimateImputer(
+...     engine="rf",
+...     target="tmin",
+...     k_neighbors=5,
+...     min_obs_per_station=10,
+...     n_estimators=100,
+...     n_jobs=-1,
+... )
+>>> df_filled = imp.fit_transform(df)
+>>> report = evaluate_stations(
+...     df,
+...     id_col="station", date_col="date",
+...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
+...     target_col="tmin",
+...     k_neighbors=5, include_target_pct=10.0,
+...     rf_params=RFParams(n_estimators=100, random_state=42),
+...     show_progress=False,
+... )
+
+License
+-------
+MIT License © 2025 Hugo Antonio Fernández
 """
 
+from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Version (read from installed package metadata; fallback for editable/dev)
+# ---------------------------------------------------------------------------
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("missclimatepy")
+except Exception:
+    __version__ = "0.1.0"
+
+# ---------------------------------------------------------------------------
+# Public symbols
+# ---------------------------------------------------------------------------
 from .api import MissClimateImputer
-from .evaluate import evaluate_all_stations_fast, RFParams
+from .evaluate import RFParams, evaluate_stations
 
 __all__ = [
     "MissClimateImputer",
-    "evaluate_all_stations_fast",
     "RFParams",
+    "evaluate_stations",
+    "__version__",
 ]
-
-# Version is kept here for a single source of truth; update on release.
-__version__ = "0.1.0"
