@@ -4,28 +4,30 @@ missclimatepy.evaluate
 ======================
 
 Station-wise evaluation for climate-data imputation using ONLY spatial
-coordinates (latitude, longitude, altitude) and calendar features (year,
-month, day-of-year, optionally cyclic sin/cos). One Random-Forest model is
-trained per target station, using either all other stations or the K nearest
-neighbors (by haversine distance on lat/lon), with optional controlled
-inclusion (leakage) of a small fraction of the target station's valid rows.
+coordinates (latitude, longitude, altitude) and calendar features
+(year, month, day-of-year, optional cyclic sin/cos). One Random-Forest
+model is trained per target station, using either all other stations or
+the K nearest neighbors (by haversine distance on lat/lon), with optional
+controlled inclusion ("leakage") of a fraction of the target station's
+valid rows.
 
 Key design choices
 ------------------
 - Generic schema: the caller provides the column names (no enforced renaming).
 - Local models: one RandomForest per station; training pool can be neighbors.
-- Controlled inclusion: include 1..95% of the target's valid rows into training
-  to adapt locally; 0% means LOSO-like exclusion.
-- Metrics: daily MAE, RMSE, R² + monthly/yearly aggregates for completeness.
-- Outputs: a station-level report (metrics, sizes, medoid coordinates) and a
-  full per-row prediction table with columns:
-  [station, date, latitude, longitude, altitude, y_obs, y_mod]
+- Controlled inclusion: include 0..95% of the target station's valid rows into
+  training to adapt locally; 0% means strict LOSO-like exclusion.
+- Metrics: daily MAE, RMSE, R² + monthly and yearly aggregates (sum/mean/median).
+- Outputs:
+  (1) station-level report with metrics, sizes, medoid coordinates; and
+  (2) full per-row predictions:
+      [station, date, latitude, longitude, altitude, y_obs, y_mod]
 
 Typical usage
 -------------
 >>> from missclimatepy.evaluate import evaluate_stations, RFParams
 >>> rep, preds = evaluate_stations(
-...     df,
+...     data=df,
 ...     id_col="station", date_col="date",
 ...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
 ...     target_col="tmin",
@@ -34,22 +36,21 @@ Typical usage
 ...     rf_params=RFParams(n_estimators=100, max_depth=30, n_jobs=-1, random_state=42),
 ...     show_progress=True,
 ... )
->>> rep.head(); preds.head()
 
 Notes
 -----
-- If you pass `neighbor_map`, it overrides `k_neighbors`. The map should be
-  a dict {station_id -> list_of_neighbor_ids}.
-- To compute haversine neighbors, only latitude/longitude are used (as required
-  by the metric). Altitude remains a feature for the regression.
-- Memory behavior: features and masks are built once; each station fits a small
-  RF on an array view (no excessive copies). Progress can be optionally logged.
+- If you pass `neighbor_map`, it overrides `k_neighbors`.
+  The map should be a dict {station_id -> list_of_neighbor_ids}.
+- Haversine neighbors use latitude/longitude only (as required by the metric).
+  Altitude remains a regression feature.
+- Memory behavior: features/masks are prepared once; each station fits its
+  own RF on array views. Optional per-station progress logging is supported.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union, Callable
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -137,7 +138,6 @@ def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False
 
 
 def _rmse_manual(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    # Manual RMSE to avoid sklearn's 'squared' kw compatibility pitfalls
     if y_true.size == 0:
         return np.nan
     diff = y_true - y_pred
@@ -160,6 +160,20 @@ def _safe_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
 
 
 _FREQ_ALIAS = {"M": "MS", "A": "YS", "Y": "YS", "Q": "QS"}
+
+
+def _freq_alias(freq: str) -> str:
+    """
+    Normalize frequency short-hands to start-period codes:
+    M -> MS; Y/A -> YS; Q -> QS.
+    """
+    return _FREQ_ALIAS.get(freq, freq)
+
+
+def _agg_op(agg: str) -> str:
+    if agg not in {"sum", "mean", "median"}:
+        raise ValueError("agg_for_metrics must be one of {'sum','mean','median'}.")
+    return agg
 
 
 def _aggregate_and_score(
@@ -192,20 +206,6 @@ def _aggregate_and_score(
 
     m = _safe_metrics(agg_df[y_col].values, agg_df[yhat_col].values)
     return m, agg_df
-
-
-def _freq_alias(freq: str) -> str:
-    """
-    Normalize frequency short-hands to start-period codes:
-    M -> MS; Y/A -> YS; Q -> QS.
-    """
-    return _FREQ_ALIAS.get(freq, freq)
-
-
-def _agg_op(agg: str) -> str:
-    if agg not in {"sum", "mean", "median"}:
-        raise ValueError("agg_for_metrics must be one of {'sum','mean','median'}.")
-    return agg
 
 
 def _preprocess_once(
@@ -265,7 +265,6 @@ def _build_neighbor_map_haversine(
     if not _HAS_SK_BALLTREE:
         raise ImportError("scikit-learn BallTree is required for Haversine neighbors.")
 
-    # Centroids per station, only lat/lon for haversine
     centroids = (
         df.groupby(id_col)[[lat_col, lon_col]]
         .median()
@@ -278,22 +277,16 @@ def _build_neighbor_map_haversine(
 
     tree = BallTree(mat, metric="haversine")
     query_k = int(k) + (1 if include_self else 0)
-    dist, ind = tree.query(mat, k=query_k)
+    _, ind = tree.query(mat, k=query_k)
 
     ids = centroids[id_col].tolist()
     neighbor_map: Dict[Union[str, int], List[Union[str, int]]] = {}
 
     for row_i, sid in enumerate(ids):
         row_idx = ind[row_i].tolist()
-        # Convert neighbor indices back to station ids
         neigh_ids = [ids[j] for j in row_idx]
         if not include_self:
-            # Remove self if present (usually first)
             neigh_ids = [nid for nid in neigh_ids if nid != sid]
-        else:
-            # If include_self, keep as returned by BallTree
-            pass
-        # Trim to exactly k neighbors
         neighbor_map[sid] = neigh_ids[: int(k)]
 
     return neighbor_map
@@ -502,12 +495,12 @@ def evaluate_stations(
     for sid in iterator:
         t0 = pd.Timestamp.utcnow().timestamp()
 
-        # Target & test subset (valid rows only)
+        # --- Leak-free split for the target station -------------------------
+        # Valid rows of the target station (candidates to include in train or to test)
         is_target = (df[id_col] == sid)
-        test_mask = is_target & valid_mask_global
-        test_df = df.loc[test_mask]
+        target_valid = df.loc[is_target & valid_mask_global]
 
-        if test_df.empty:
+        if target_valid.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
                 "station": sid, "n_rows": 0, "seconds": sec,
@@ -530,25 +523,36 @@ def evaluate_stations(
                 tqdm.write(f"Station {sid}: 0 valid test rows (skipped)")
             continue
 
-        # Training pool: all others or neighbors-only
+        # Training pool: all others or neighbors-only (strictly excluding target)
         if nmap is not None:
             neigh_ids = nmap.get(sid, [])
-            # train from neighbors only, strictly excluding the target
             train_pool_mask = df[id_col].isin(neigh_ids) & (~is_target)
         else:
-            # all stations except the target
             train_pool_mask = ~is_target
-
         train_pool = df.loc[train_pool_mask & valid_mask_global]
 
-        # Optional controlled inclusion (sample % of target valid rows into training)
+        # Controlled inclusion without leakage: the included rows are removed from test
         pct = max(0.0, min(float(include_target_pct), 95.0))
-        if pct > 0.0 and not test_df.empty:
-            n_take = int(np.ceil(len(test_df) * (pct / 100.0)))
-            sample_idx = test_df.sample(n=n_take, random_state=int(include_target_seed)).index
-            train_df = pd.concat([train_pool, df.loc[sample_idx]], axis=0, copy=False)
+        if pct > 0.0:
+            n_take = int(np.ceil(len(target_valid) * (pct / 100.0)))
+            # Keep at least one row for test if possible
+            if len(target_valid) > 1:
+                n_take = min(n_take, len(target_valid) - 1)
+            else:
+                n_take = 0
         else:
-            train_df = train_pool
+            n_take = 0
+
+        if n_take > 0:
+            sample_idx = target_valid.sample(n=n_take, random_state=int(include_target_seed)).index
+            inc_target_df = target_valid.loc[sample_idx]
+            test_df = target_valid.drop(index=sample_idx)
+        else:
+            inc_target_df = target_valid.iloc[0:0]
+            test_df = target_valid
+
+        # Final train = pool (neighbors/others) + included slice of the target
+        train_df = pd.concat([train_pool, inc_target_df], axis=0, copy=False)
 
         if train_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
@@ -559,7 +563,7 @@ def evaluate_stations(
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
                 "used_k_neighbors": used_k,
-                "include_target_pct": float(include_target_pct),
+                "include_target_pct": float(pct),
                 "latitude": float(medoids.loc[sid, "latitude"]) if sid in medoids.index else np.nan,
                 "longitude": float(medoids.loc[sid, "longitude"]) if sid in medoids.index else np.nan,
                 "altitude": float(medoids.loc[sid, "altitude"]) if sid in medoids.index else np.nan,
@@ -573,7 +577,7 @@ def evaluate_stations(
                 tqdm.write(f"Station {sid}: empty train (skipped)")
             continue
 
-        # Fit RF
+        # --- Fit & predict ---------------------------------------------------
         model = RandomForestRegressor(**rf_kwargs)
         X_train = train_df[feats].to_numpy(copy=False)
         y_train = train_df[target_col].to_numpy(copy=False)
@@ -583,13 +587,13 @@ def evaluate_stations(
         model.fit(X_train, y_train)
         y_hat = model.predict(X_test)
 
-        # Build per-station prediction dataframe with canonical names
+        # Per-row predictions with canonical names
         pred_df = pd.DataFrame({
             "station": sid,
             date_col: test_df[date_col].values,
-            lat_col: test_df[lat_col].astype(float).values,
-            lon_col: test_df[lon_col].astype(float).values,
-            alt_col: test_df[alt_col].astype(float).values,
+            "latitude": test_df[lat_col].astype(float).values,
+            "longitude": test_df[lon_col].astype(float).values,
+            "altitude": test_df[alt_col].astype(float).values,
             "y_obs": y_test,
             "y_mod": y_hat,
         })
@@ -597,7 +601,7 @@ def evaluate_stations(
         # Metrics (daily)
         daily = _safe_metrics(pred_df["y_obs"].values, pred_df["y_mod"].values)
 
-        # Optional aggregates (monthly/annual) for completeness
+        # Monthly / Annual aggregates (optional completeness)
         monthly, _ = _aggregate_and_score(
             pred_df, date_col=date_col, y_col="y_obs", yhat_col="y_mod", freq="M", agg=agg_for_metrics
         )
@@ -614,7 +618,7 @@ def evaluate_stations(
             "rows_test": int(len(test_df)),
             "MAE_d": float(daily["MAE"]),
             "RMSE_d": float(daily["RMSE"]),
-            "R2_d": float(daily["R2"]) if daily["R2"] == daily["R2"] else np.nan,  # preserve NaN
+            "R2_d": float(daily["R2"]) if daily["R2"] == daily["R2"] else np.nan,
             "MAE_m": float(monthly["MAE"]),
             "RMSE_m": float(monthly["RMSE"]),
             "R2_m": float(monthly["R2"]) if monthly["R2"] == monthly["R2"] else np.nan,
@@ -649,10 +653,10 @@ def evaluate_stations(
     # Final report & predictions
     report = pd.DataFrame(rows_report)
     preds = pd.concat(all_preds, axis=0, ignore_index=True) if all_preds else pd.DataFrame(
-        columns=[id_col, date_col, lat_col, lon_col, alt_col, "y_obs", "y_mod"]
+        columns=[id_col, date_col, "latitude", "longitude", "altitude", "y_obs", "y_mod"]
     )
 
-    # Optional save (report only, by design)
+    # Optional save (report only)
     if save_table_path:
         ext = str(save_table_path).lower()
         if ext.endswith(".csv"):
