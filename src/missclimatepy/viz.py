@@ -10,6 +10,8 @@ This module provides small, composable plotting helpers to explore:
 - Station-level time series overlays (observed vs. predicted).
 - Simple spatial scatter of performance by station coordinates.
 - Gap length distributions (requires gap profiles from masking.gap_profile_by_station).
+- Observed vs imputed series visualization (from impute_dataset output).
+- Imputation coverage per station (share of imputed points).
 
 Design principles
 -----------------
@@ -65,6 +67,7 @@ def _coerce_datetime(s: pd.Series) -> pd.Series:
     Best-effort datetime coercion without timezones (naive).
     """
     out = pd.to_datetime(s, errors="coerce")
+    # Avoid deprecated is_datetime64tz_dtype; check dtype class instead
     if isinstance(out.dtype, pd.DatetimeTZDtype):
         out = out.dt.tz_localize(None)
     return out
@@ -436,6 +439,163 @@ def plot_gap_histogram(
     return ax
 
 
+# ---------------------------------------------------------------------
+# New: Observed vs Imputed series (from imputation output)
+# ---------------------------------------------------------------------
+def plot_imputed_series(
+    df: pd.DataFrame,
+    *,
+    station: str,
+    id_col: str = "station",
+    date_col: str = "date",
+    target_col: str = "tmin",
+    source_col: str = "source",
+    start: str | None = None,
+    end: str | None = None,
+    title: str | None = None,
+    figsize: Tuple[float, float] = (11.0, 4.0),
+    alpha_line: float = 0.9,
+    ms: int = 12,
+) -> Axes:
+    """
+    Plot a single station's time series highlighting observed vs imputed points.
+    Intended for the dataframe returned by `impute_dataset(...)`, which must
+    include `source_col` ∈ {"observed","imputed"}.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Output of `impute_dataset(...)` (must include `source_col`).
+    station : str
+        Station identifier to plot.
+    id_col, date_col, target_col, source_col : str
+        Column names. `source_col` should contain "observed" / "imputed".
+    start, end : str or None
+        Optional inclusive window to display.
+    title : str or None
+        Custom plot title; if None a default is constructed.
+    figsize : (float, float)
+        Figure size.
+    alpha_line : float
+        Alpha for the continuous background line.
+    ms : int
+        Marker size for observed/imputed points.
+
+    Returns
+    -------
+    Axes
+    """
+    fig, ax, created = _ensure_ax(None, figsize)
+
+    if df.empty:
+        return _no_data(ax, "Empty dataframe: nothing to plot.")
+
+    if date_col not in df.columns:
+        return _no_data(ax, f"Column '{date_col}' not found.")
+
+    # Filter single station and optional window
+    sub = df[df[id_col] == station].copy()
+    if sub.empty:
+        return _no_data(ax, f"No rows for station '{station}'.")
+    sub[date_col] = _coerce_datetime(sub[date_col])
+    if start or end:
+        lo = pd.to_datetime(start) if start else sub[date_col].min()
+        hi = pd.to_datetime(end) if end else sub[date_col].max()
+        sub = sub[(sub[date_col] >= lo) & (sub[date_col] <= hi)].copy()
+        if sub.empty:
+            return _no_data(ax, "No data in the requested window.")
+
+    # Sort, split by source
+    sub = sub.sort_values(date_col)
+    obs = sub[sub[source_col] == "observed"]
+    imp = sub[sub[source_col] == "imputed"]
+
+    # Background line for continuity
+    ax.plot(sub[date_col], sub[target_col], lw=1.2, alpha=alpha_line)
+
+    # Scatters to highlight observed vs imputed
+    if not obs.empty:
+        ax.scatter(obs[date_col], obs[target_col], marker="o", s=ms, label="Observed", zorder=3)
+    if not imp.empty:
+        ax.scatter(imp[date_col], imp[target_col], marker="x", s=ms, label="Imputed", zorder=3)
+
+    # Cosmetics
+    ax.set_xlabel("Date")
+    ax.set_ylabel(target_col)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", frameon=False)
+    ax.set_title(title or f"{station} — {target_col} (observed vs imputed)")
+    fig.tight_layout()
+    return ax
+
+
+def plot_imputation_coverage(
+    df: pd.DataFrame,
+    *,
+    id_col: str = "station",
+    source_col: str = "source",
+    sort_by: str = "imputed_ratio",
+    figsize: Tuple[float, float] = (10.0, 5.0),
+) -> Axes:
+    """
+    Bar chart of imputation coverage per station (share of imputed points).
+
+    Parameters
+    ----------
+    df : DataFrame
+        Output of `impute_dataset(...)`.
+    id_col, source_col : str
+        Column names; `source_col` ∈ {"observed","imputed"}.
+    sort_by : {"imputed_ratio","observed_ratio","station"}
+        Sort criterion for bars.
+    figsize : (float, float)
+        Figure size.
+
+    Returns
+    -------
+    Axes
+    """
+    fig, ax, created = _ensure_ax(None, figsize)
+
+    if df.empty:
+        return _no_data(ax, "Empty dataframe.")
+
+    if source_col not in df.columns or id_col not in df.columns:
+        return _no_data(ax, "Missing required columns for coverage plot.")
+
+    # Ratios per station
+    tab = (df
+           .assign(is_imp=(df[source_col] == "imputed").astype(int))
+           .groupby(id_col)["is_imp"]
+           .agg(imputed="sum", total="count"))
+    if tab.empty:
+        return _no_data(ax, "No grouped data for coverage.")
+
+    tab["imputed_ratio"] = tab["imputed"] / tab["total"]
+    tab["observed_ratio"] = 1.0 - tab["imputed_ratio"]
+
+    if sort_by not in {"imputed_ratio", "observed_ratio", "station"}:
+        return _no_data(ax, "Invalid sort_by parameter.")
+
+    if sort_by == "station":
+        tab = tab.sort_index()
+    else:
+        tab = tab.sort_values(sort_by, ascending=False)
+
+    ax.bar(tab.index.astype(str), tab["imputed_ratio"].values)
+    ax.set_ylabel("Imputed share")
+    ax.set_xlabel(id_col)
+    ax.set_ylim(0, 1)
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_title("Imputation coverage per station")
+    # Reduce x label clutter for many stations
+    if len(tab) > 20:
+        for label in ax.get_xticklabels():
+            label.set_rotation(90)
+            label.set_ha("center")
+    return ax
+
+
 __all__ = [
     "plot_missing_matrix",
     "plot_metrics_distribution",
@@ -443,4 +603,6 @@ __all__ = [
     "plot_time_series_overlay",
     "plot_spatial_scatter",
     "plot_gap_histogram",
+    "plot_imputed_series",
+    "plot_imputation_coverage",
 ]
