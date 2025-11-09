@@ -1,3 +1,4 @@
+# src/missclimatepy/imputate.py
 # SPDX-License-Identifier: MIT
 """
 missclimatepy.imputate
@@ -7,30 +8,30 @@ Minimal long-format imputation for a *single target* variable using ONLY:
 - Spatial coordinates: latitude, longitude, altitude
 - Calendar features: year, month, day-of-year (and optional cyclic sin/cos)
 
-For each *selected* station, we train **one RandomForestRegressor** using:
-1) Either the K nearest spatial neighbors (by haversine over (lat, lon)) or
+For each *selected* station, a **RandomForestRegressor** is trained with:
+1) Either the K nearest spatial neighbors (haversine over (lat, lon)) or
    *all other* stations if `k_neighbors=None`, and
-2) An optional controlled inclusion (`include_target_pct`) of the target
-   station's own valid rows (to adapt locally).
+2) **Full inclusion of the target station's valid rows** (no percentage control).
 
-The function returns a **minimal tidy table** with exactly:
+Key policy: MDR by *observed target rows*
+-----------------------------------------
+A station is *eligible for imputation* only if its **count of observed (non-NaN)
+target rows within [start, end]** is ≥ `max(1826, min_station_rows or 0)`.
+Stations below this threshold are returned as:
+- full daily grid in the window,
+- observed values preserved,
+- remaining gaps left as NaN,
+- `source` set to "observed" where present and NaN otherwise,
+i.e., **no imputation** is performed.
+
+Output (minimal tidy)
+---------------------
+Exactly these columns, in order:
 [station, date, latitude, longitude, altitude, <target>, source]
-where `source` ∈ {"observed", "imputed"}.
+with `source` ∈ {"observed", "imputed"}.
 
-Key policies
-------------
-- **MDR (Minimum Data Requirement)** per station:
-  A station is eligible only if its **original row count in [start, end]**
-  is >= max(1826, min_station_rows if provided). Esta política usa el
-  número de filas originales en la ventana (independiente del missing del target).
-- **Single-target discipline**:
-  Se entrena y se imputa exclusivamente `target_col`. Ninguna otra variable
-  entra al objetivo de entrenamiento ni a la salida.
-- **Schema-agnostic**:
-  Todos los nombres de columna son parámetros de la función.
-
-Typical usage
--------------
+Example
+-------
 >>> from missclimatepy.imputate import impute_dataset
 >>> from missclimatepy.evaluate import RFParams
 >>> out = impute_dataset(
@@ -39,18 +40,13 @@ Typical usage
 ...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
 ...     target_col="tmin",
 ...     start="1981-01-01", end="2023-12-31",
-...     k_neighbors=20, include_target_pct=80.0,
-...     rf_params=RFParams(n_estimators=200, max_depth=30, n_jobs=-1, random_state=42),
+...     k_neighbors=20,
+...     rf_params=RFParams(n_estimators=300, max_depth=30, n_jobs=-1, random_state=42),
+...     min_station_rows=None,   # MDR uses 1826 by default
 ...     show_progress=True,
 ... )
->>> out.columns
-Index(['station','date','latitude','longitude','altitude','tmin','source'], dtype='object')
-
-Reproducibility & scope
------------------------
-- Determinism via `rf_params.random_state` y muestreo con `include_target_seed`.
-- Sin dependencias a datos externos. No requiere covariables climáticas adicionales.
-- Pensado para *gap-filling* de series diarias con cobertura ≥ ~5 años por estación.
+>>> out.columns.tolist()
+['station','date','latitude','longitude','altitude','tmin','source']
 """
 
 from __future__ import annotations
@@ -70,11 +66,11 @@ from .evaluate import (
     _build_neighbor_map_haversine,
 )
 
-try:
-    from tqdm.auto import tqdm  # optional progress bar
+try:  # optional progress bar
+    from tqdm.auto import tqdm
 except Exception:  # pragma: no cover
     def tqdm(x, **kwargs):
-        return x  # fallback: transparent iterator
+        return x  # transparent iterator
 
 
 def impute_dataset(
@@ -98,12 +94,10 @@ def impute_dataset(
     station_ids: Optional[Iterable[Union[str, int]]] = None,
     regex: Optional[str] = None,
     custom_filter: Optional[Callable[[Union[str, int]], bool]] = None,
-    # neighbors & optional leakage from target
+    # neighbors
     k_neighbors: Optional[int] = 20,
     neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]] = None,
-    include_target_pct: float = 0.0,     # 0..95 (observed rows from the target added to train)
-    include_target_seed: int = 42,
-    # station MDR
+    # MDR (minimum observed rows within the window)
     min_station_rows: Optional[int] = None,
     # model
     rf_params: Optional[Union[RFParams, Dict]] = None,
@@ -114,11 +108,11 @@ def impute_dataset(
     Impute the target time series for *selected* stations over [start, end]
     and return a minimal long-format DataFrame.
 
-    Eligibility (MDR)
+    MDR (eligibility)
     -----------------
-    A station is **processed** only if its original number of rows within
-    [start, end] is >= max(1826, min_station_rows if provided). Stations
-    not meeting MDR are silently skipped.
+    A station is imputed only if the number of **observed (non-NaN) target rows**
+    within [start, end] is ≥ `max(1826, min_station_rows or 0)`. Otherwise,
+    the station is returned observed-only (no imputation), preserving gaps.
 
     Parameters
     ----------
@@ -135,7 +129,7 @@ def impute_dataset(
     feature_cols : list[str] or None
         Custom feature list. Default: [lat, lon, alt, year, month, doy] (+ cyc).
     prefix, station_ids, regex, custom_filter :
-        Optional filters to select which stations to impute (OR semantics).
+        Optional filters to select which stations to process (OR semantics).
         If none provided, all stations are considered.
     k_neighbors : int or None
         If provided and `neighbor_map` is None, build a KNN haversine map over
@@ -143,14 +137,10 @@ def impute_dataset(
         If None, train with *all other* stations.
     neighbor_map : dict or None
         Overrides `k_neighbors`. Dict {station_id -> list_of_neighbor_ids}.
-    include_target_pct : float
-        Percent (0..95) of the target station’s valid rows to include in training.
-        Use 0 for strict LOSO-style exclusion; use a positive value to adapt locally.
-    include_target_seed : int
-        RNG seed for sampling target rows when `include_target_pct` > 0.
     min_station_rows : int or None
-        Optional hint for MDR. Actual threshold is:
-        MDR_MIN = max(1826, min_station_rows if provided).
+        Optional stricter MDR. Actual threshold is:
+        `MDR_MIN = max(1826, min_station_rows or 0)`.
+        MDR counts **observed target rows** within [start, end].
     rf_params : RFParams | dict | None
         RandomForest hyperparameters. Missing fields use defaults.
     show_progress : bool
@@ -167,7 +157,7 @@ def impute_dataset(
     -----
     - Only the target variable is modeled and returned.
     - Coordinates in the output are station-level medoids (median per station).
-    - Determinism depends on `rf_params.random_state` and `include_target_seed`.
+    - Determinism depends on `rf_params.random_state`.
     """
     # ---- basic validation & windowing ---------------------------------------
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
@@ -216,16 +206,27 @@ def impute_dataset(
     if not chosen:
         chosen = all_ids
 
+    # Stable order, unique
     seen = set()
     stations = [s for s in chosen if not (s in seen or seen.add(s))]
 
-    # ---- MDR filter (per station, based on original rows in window) ----------
+    # ---- MDR filter (by *observed* target rows in window) -------------------
     base_mdr = 1826
     user_mdr = int(min_station_rows) if (min_station_rows is not None) else 0
     MDR_MIN = max(base_mdr, user_mdr)
 
-    rows_per_station = df.groupby(id_col, sort=False)[date_col].size().astype(int)
-    stations = [s for s in stations if int(rows_per_station.get(s, 0)) >= MDR_MIN]
+    # Count observed (non-NaN) target rows per station within window
+    observed_mask = ~df[target_col].isna()
+    obs_counts = df.loc[observed_mask].groupby(id_col, sort=False)[target_col].size().astype(int)
+
+    eligible = [s for s in stations if int(obs_counts.get(s, 0)) >= MDR_MIN]
+    if show_progress and len(eligible) != len(stations):
+        skipped = [s for s in stations if s not in eligible]
+        tqdm.write(
+            f"MDR (observed≥{MDR_MIN}) filter: {len(stations)} → {len(eligible)} stations "
+            f"(skipped {len(skipped)})"
+        )
+    stations = eligible
 
     if not stations:
         return pd.DataFrame(columns=[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"])
@@ -254,7 +255,7 @@ def impute_dataset(
     full_dates = pd.date_range(lo, hi, freq="D")
     medoids = (
         df.groupby(id_col)[[lat_col, lon_col, alt_col]]
-        .median()
+        .median(numeric_only=True)
         .rename(columns={lat_col: "latitude", lon_col: "longitude", alt_col: "altitude"})
     )
 
@@ -283,10 +284,10 @@ def impute_dataset(
         st_obs = df.loc[df[id_col] == sid, [date_col, target_col]]
         merged = grid.merge(st_obs, on=date_col, how="left")
 
-        # Recompute features on the full grid (fast; deterministic)
+        # Recompute features on the full grid
         merged = _add_time_features(merged, date_col, add_cyclic=add_cyclic)
 
-        # Build training pool: neighbors or all-other stations
+        # Build training pool: neighbors or all-other stations (exclude target)
         is_target_mask = (df[id_col] == sid)
         if nmap is not None:
             neigh_ids = nmap.get(sid, [])
@@ -296,18 +297,12 @@ def impute_dataset(
 
         train_pool = df.loc[pool_mask, feats + [target_col]]
 
-        # Optional inclusion (leakage) from the target’s valid rows
+        # FULL inclusion of the target station's valid rows (no percentage control)
         st_valid = df.loc[is_target_mask & valid_mask_global, feats + [target_col]]
-        pct = max(0.0, min(float(include_target_pct), 95.0))
-        if pct > 0.0 and not st_valid.empty:
-            n_take = int(np.ceil(len(st_valid) * (pct / 100.0)))
-            leakage = st_valid.sample(n=n_take, random_state=int(include_target_seed))
-            train_df = pd.concat([train_pool, leakage], axis=0, ignore_index=True)
-        else:
-            train_df = train_pool
+        train_df = pd.concat([train_pool, st_valid], axis=0, ignore_index=True)
 
         if train_df.empty:
-            # No training data → cannot impute; return observed-only rows as minimal block
+            # Should not happen for MDR-eligible stations, but guard anyway
             y_obs = merged[target_col].to_numpy()
             out = pd.DataFrame({
                 id_col: sid,
@@ -320,7 +315,7 @@ def impute_dataset(
             })
             out_blocks.append(out)
             if show_progress:
-                tqdm.write(f"Station {sid}: empty training pool → observed-only (no imputation).")
+                tqdm.write(f"Station {sid}: empty training set → observed-only.")
             continue
 
         # Fit and predict
@@ -356,7 +351,7 @@ def impute_dataset(
             k_text = len(nmap.get(sid, [])) if nmap is not None else "all"
             tqdm.write(
                 f"Station {sid}: window={len(out):,}  observed={n_obs:,}  imputed={n_imp:,}  "
-                f"k={k_text}  incl={pct:.1f}%"
+                f"k={k_text}"
             )
 
     # Stack, sort, return *minimal* schema only

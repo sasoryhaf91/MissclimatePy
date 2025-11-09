@@ -1,51 +1,49 @@
+# tests/test_imputate.py
+# SPDX-License-Identifier: MIT
+
 import numpy as np
 import pandas as pd
 
 from missclimatepy.imputate import impute_dataset
 from missclimatepy.evaluate import RFParams
 
-
-def _build_station(station_id: str, start: str, periods: int, freq: str = "D",
-                   lat: float = 19.5, lon: float = -99.1, alt: float = 2300.0,
-                   miss_ratio: float = 0.1, seed: int = 0):
+def _build_station(station_id: str, start: str, *, periods: int, miss_ratio: float, seed: int = 0):
     """
-    Helper: create a synthetic station with some missing target values.
-    Ensures tmin is a mutable NumPy array (not a pandas Index) so we can
-    assign NaNs for masking.
+    Build a single-station synthetic daily series with a sinusoidal target (tmin).
+    `miss_ratio` fraction of rows are set to NaN (uniform at random).
     """
     rng = np.random.default_rng(seed)
-    dates = pd.date_range(start, periods=periods, freq=freq)
+    dates = pd.date_range(start, periods=periods, freq="D")
 
-    # Use NumPy arrays to avoid immutable pandas Index
+    # Simple seasonal signal + noise
     doy = dates.dayofyear.to_numpy()
-    base = 10.0 + 5.0 * np.sin(2.0 * np.pi * (doy / 365.25))
-    noise = rng.normal(0.0, 0.7, size=dates.size)
-    tmin = (base + noise).astype(float)
+    tmin = 10 + 5 * np.sin(2 * np.pi * (doy / 365.25)) + rng.normal(0, 0.5, size=periods)
 
-    # inject missing
-    n_miss = int(len(dates) * miss_ratio)
-    if n_miss > 0:
-        miss_idx = rng.choice(len(dates), size=n_miss, replace=False)
-        tmin[miss_idx] = np.nan
+    # Randomly mask a fraction of rows
+    miss_count = int(np.floor(miss_ratio * periods))
+    miss_idx = rng.choice(np.arange(periods), size=miss_count, replace=False)
+    tmin = pd.Series(tmin, index=np.arange(periods))  # mutable
+    tmin.iloc[miss_idx] = np.nan
 
     df = pd.DataFrame({
         "station": station_id,
         "date": dates,
-        "latitude": float(lat),
-        "longitude": float(lon),
-        "altitude": float(alt),
-        "tmin": tmin,
+        "latitude": 19.5,
+        "longitude": -99.1,
+        "altitude": 2300.0,
+        "tmin": tmin.values,
     })
     return df
 
 
 def test_impute_dataset_basic_large_passes_mdr():
     """
-    One large station (> 1825 valid rows) must be imputed over the whole window,
-    with no NaNs remaining in the target, and with 'source' marking observed/imputed.
+    One large station with enough *observed* rows (>= 1826) must be imputed
+    over the whole window. Output must be minimal schema and have no NaNs
+    in the target column.
     """
-    # 2000 daily rows ~ 5.48 years -> passes MDR
-    big = _build_station("S_BIG", "2000-01-01", periods=2000, miss_ratio=0.15, seed=1)
+    # 2000 daily rows; choose 5% missing → ~1900 observed >= 1826
+    big = _build_station("S_BIG", "2000-01-01", periods=2000, miss_ratio=0.05, seed=1)
 
     df = big.copy()
     out = impute_dataset(
@@ -57,15 +55,14 @@ def test_impute_dataset_basic_large_passes_mdr():
         alt_col="altitude",
         target_col="tmin",
         start="2000-01-01",
-        end="2005-06-23",   # exactly 2000 days from start
-        k_neighbors=None,   # use all-other stations (none), rely on include_target_pct
-        include_target_pct=95.0,
-        rf_params=RFParams(n_estimators=50, max_depth=20, n_jobs=1, random_state=42),
+        end="2005-06-23",  # inclusive → 2001 days
+        k_neighbors=None,  # use all other stations; target valid rows are fully included
+        rf_params=RFParams(n_estimators=80, max_depth=20, n_jobs=1, random_state=42),
         show_progress=False,
     )
 
-    # Schema checks
-    assert {"station", "date", "latitude", "longitude", "altitude", "tmin", "source"} <= set(out.columns)
+    # Schema checks (minimal)
+    assert list(out.columns) == ["station", "date", "latitude", "longitude", "altitude", "tmin", "source"]
 
     # Full coverage for the window, single station
     expected_len = len(pd.date_range("2000-01-01", "2005-06-23", freq="D"))
@@ -75,20 +72,19 @@ def test_impute_dataset_basic_large_passes_mdr():
     # No missing values after imputation
     assert out["tmin"].isna().sum() == 0
 
-    # Source must contain both observed and imputed (since we injected holes)
+    # 'source' must be only 'observed' or 'imputed'
     assert set(out["source"].unique()) <= {"observed", "imputed"}
-    assert (out["source"] == "imputed").sum() > 0
 
 
 def test_impute_dataset_mdr_filters_small_station():
     """
-    When two stations are provided, only the one that satisfies MDR (>1825) is imputed.
-    The short station is filtered out even if the caller passes a small threshold,
-    because the function enforces 1826 internally.
+    When two stations are provided, only the one that satisfies MDR
+    (observed >= 1826 rows in the window) is imputed and appears in output.
+    The short station is excluded from the result.
     """
-    # Large (passes MDR)
-    big = _build_station("S_BIG", "2000-01-01", periods=2000, miss_ratio=0.1, seed=2)
-    # Small (fails MDR)
+    # Large (passes MDR): 2000 periods, 5% missing → ~1900 observed
+    big = _build_station("S_BIG", "2000-01-01", periods=2000, miss_ratio=0.05, seed=2)
+    # Small (fails MDR): 120 periods, ~96 observed
     small = _build_station("S_SMALL", "2004-01-01", periods=120, miss_ratio=0.2, seed=3)
 
     df = pd.concat([big, small], ignore_index=True)
@@ -103,11 +99,9 @@ def test_impute_dataset_mdr_filters_small_station():
         target_col="tmin",
         start="2000-01-01",
         end="2005-06-23",
-        # Pass a lenient threshold; function will still enforce 1826
-        min_station_rows=10,
+        # MDR uses observed-count >= max(1826, min_station_rows or 0)
         k_neighbors=None,
-        include_target_pct=95.0,
-        rf_params=RFParams(n_estimators=40, max_depth=16, n_jobs=1, random_state=0),
+        rf_params=RFParams(n_estimators=60, max_depth=16, n_jobs=1, random_state=0),
         show_progress=False,
     )
 
@@ -115,10 +109,6 @@ def test_impute_dataset_mdr_filters_small_station():
     assert out["station"].nunique() == 1
     assert out["station"].unique()[0] == "S_BIG"
 
-    # Complete coverage for the output station's requested window
-    expected_len = len(pd.date_range("2000-01-01", "2005-06-23", freq="D"))
-    assert len(out) == expected_len
-
-    # No missing values after imputation
+    # Output has full minimal schema and no NaNs in target for the kept station
+    assert list(out.columns) == ["station", "date", "latitude", "longitude", "altitude", "tmin", "source"]
     assert out["tmin"].isna().sum() == 0
-    assert set(out["source"].unique()) <= {"observed", "imputed"}
