@@ -6,68 +6,89 @@ missclimatepy.evaluate
 Station-wise evaluation for climate-data imputation using ONLY spatial
 coordinates (latitude, longitude, altitude) and calendar features
 (year, month, day-of-year, optional cyclic sin/cos). One Random-Forest
-model is trained per target station, using either all other stations or
-the K nearest neighbors (by haversine distance on lat/lon), with optional
-controlled inclusion ("leakage") of a fraction of the target station's
-valid rows.
+model is trained per **target station**, using either **all other stations**
+or its **K nearest neighbors** (by haversine distance on lat/lon), with
+optional **controlled inclusion** (“leakage”) of a fraction of the target
+station’s *observed* rows in the training set.
+
+Why this matters
+----------------
+- Many networks have long gaps and no reliable covariates. This evaluator
+  quantifies what you can achieve from spatial coordinates + calendar alone.
+- Inclusion of a percentage of the target’s own rows (0..95%) demonstrates
+  how *local adaptation* reduces error—while avoiding test leakage by
+  removing included rows from the test set.
+
+Output
+------
+(1) A station-level **report** with daily, monthly and yearly metrics:
+
+    [station, n_rows, seconds, rows_train, rows_test,
+     MAE_d, RMSE_d, R2_d, MAE_m, RMSE_m, R2_m, MAE_y, RMSE_y, R2_y,
+     used_k_neighbors, include_target_pct, latitude, longitude, altitude]
+
+    Coordinates are station **medoids** (median per station in the window).
+
+(2) A per-row **predictions** table for each evaluated station:
+
+    [<id_col>, <date_col>, latitude, longitude, altitude, y_obs, y_mod]
 
 Key design choices
 ------------------
-- Generic schema: the caller provides the column names (no enforced renaming).
-- Local models: one RandomForest per station; training pool can be neighbors.
-- Controlled inclusion: include 0..95% of the target station's valid rows into
-  training to adapt locally; 0% means strict LOSO-like exclusion.
-- Metrics: daily MAE, RMSE, R² + monthly and yearly aggregates (sum/mean/median).
-- Outputs:
-  (1) station-level report with metrics, sizes, medoid coordinates; and
-  (2) full per-row predictions:
-      [station, date, latitude, longitude, altitude, y_obs, y_mod]
+- Schema-agnostic: caller passes column names; we don’t rename the user data.
+- Eligibility: `min_station_rows` counts **observed target rows** in-window.
+- Deterministic inclusion sampling: metrics vary sensibly with `include_target_pct`.
+- Optional train rebalancing to make inclusion effects more visible/consistent:
+  - `rebalance_mode="cap"`: downsample the neighbor/all-others pool to a cap.
+  - `rebalance_mode="weight"`: up-weight the included target rows via sample weights.
 
-Typical usage
--------------
+Example
+-------
 >>> from missclimatepy.evaluate import evaluate_stations, RFParams
->>> rep, preds = evaluate_stations(
+>>> report, preds = evaluate_stations(
 ...     data=df,
 ...     id_col="station", date_col="date",
 ...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
 ...     target_col="tmin",
 ...     start="1991-01-01", end="2020-12-31",
 ...     k_neighbors=20, include_target_pct=20.0,
-...     rf_params=RFParams(n_estimators=100, max_depth=30, n_jobs=-1, random_state=42),
+...     rf_params=RFParams(n_estimators=200, max_depth=30, n_jobs=-1, random_state=42),
+...     rebalance_mode="cap", cap_max_pool_rows=20000,
 ...     show_progress=True,
 ... )
 
 Notes
 -----
-- If you pass `neighbor_map`, it overrides `k_neighbors`.
-  The map should be a dict {station_id -> list_of_neighbor_ids}.
-- Haversine neighbors use latitude/longitude only (as required by the metric).
+- If you pass `neighbor_map`, it overrides `k_neighbors` and must be
+  `{station_id -> [neighbors...]}`.
+- Haversine neighbors use latitude/longitude only (as the metric requires).
   Altitude remains a regression feature.
-- Memory behavior: features/masks are prepared once; each station fits its
-  own RF on array views. Optional per-station progress logging is supported.
+- Memory: features/masks are prepared once; each station fits its own RF.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 
+# Optional: haversine KNN via scikit-learn BallTree
 try:
     from sklearn.neighbors import BallTree
     _HAS_SK_BALLTREE = True
 except Exception:  # pragma: no cover
     _HAS_SK_BALLTREE = False
 
+# Optional: progress bar
 try:
-    from tqdm.auto import tqdm  # optional progress bar
+    from tqdm.auto import tqdm
 except Exception:  # pragma: no cover
     def tqdm(x, **kwargs):
-        return x  # fallback: transparent iterator
+        return x  # transparent iterator
 
 
 # --------------------------------------------------------------------------- #
@@ -86,7 +107,7 @@ class RFParams:
     min_samples_split : int
     min_samples_leaf : int
     max_features : str | int | float | None
-        For modern scikit-learn, preferred strings are {"sqrt","log2"} or None.
+        For modern scikit-learn, use {"sqrt","log2"} or None.
     bootstrap : bool
     n_jobs : int
     random_state : int
@@ -102,7 +123,7 @@ class RFParams:
 
 
 # --------------------------------------------------------------------------- #
-# Internal helpers
+# Internal helpers (schema & time)
 # --------------------------------------------------------------------------- #
 
 def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
@@ -119,8 +140,8 @@ def _ensure_datetime_naive(s: pd.Series) -> pd.Series:
     Ensure a naive (timezone-free) datetime64[ns] series.
     """
     s = pd.to_datetime(s, errors="coerce")
-    # Avoid deprecated is_datetime64tz_dtype; check dtype class instead
-    if isinstance(s.dtype, pd.DatetimeTZDtype):
+    # Avoid deprecated dtype helpers; check dtype class
+    if isinstance(s.dtype, pd.DatetimeTZDtype):  # type: ignore[attr-defined]
         s = s.dt.tz_localize(None)
     return s
 
@@ -131,7 +152,7 @@ def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False
     out["month"] = out[date_col].dt.month.astype("int16", copy=False)
     out["doy"] = out[date_col].dt.dayofyear.astype("int16", copy=False)
     if add_cyclic:
-        # 365.25 to keep leap-years roughly consistent
+        # 365.25 keeps leap-years roughly in phase
         out["doy_sin"] = np.sin(2.0 * np.pi * out["doy"].to_numpy() / 365.25)
         out["doy_cos"] = np.cos(2.0 * np.pi * out["doy"].to_numpy() / 365.25)
     return out
@@ -159,14 +180,14 @@ def _safe_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {"MAE": mae, "RMSE": rmse, "R2": r2}
 
 
+# --------------------------------------------------------------------------- #
+# Aggregations for monthly/annual metrics
+# --------------------------------------------------------------------------- #
+
 _FREQ_ALIAS = {"M": "MS", "A": "YS", "Y": "YS", "Q": "QS"}
 
-
 def _freq_alias(freq: str) -> str:
-    """
-    Normalize frequency short-hands to start-period codes:
-    M -> MS; Y/A -> YS; Q -> QS.
-    """
+    """Normalize frequency codes to start-boundary aliases."""
     return _FREQ_ALIAS.get(freq, freq)
 
 
@@ -186,7 +207,7 @@ def _aggregate_and_score(
     agg: str = "sum",
 ) -> Tuple[Dict[str, float], pd.DataFrame]:
     """
-    Aggregate to a given frequency and score on the overlap.
+    Aggregate to `freq` and score on the overlap.
 
     Returns
     -------
@@ -207,6 +228,10 @@ def _aggregate_and_score(
     m = _safe_metrics(agg_df[y_col].values, agg_df[yhat_col].values)
     return m, agg_df
 
+
+# --------------------------------------------------------------------------- #
+# Preprocess once: clip & feature list assembly
+# --------------------------------------------------------------------------- #
 
 def _preprocess_once(
     data: pd.DataFrame,
@@ -249,6 +274,10 @@ def _preprocess_once(
     return df, feats
 
 
+# --------------------------------------------------------------------------- #
+# Haversine KNN neighbor map
+# --------------------------------------------------------------------------- #
+
 def _build_neighbor_map_haversine(
     df: pd.DataFrame,
     *,
@@ -260,7 +289,7 @@ def _build_neighbor_map_haversine(
 ) -> Dict[Union[str, int], List[Union[str, int]]]:
     """
     Construct a neighbor map {station -> [neighbors...]} using Haversine KNN
-    over per-station (median) centroids on (latitude, longitude).
+    over per-station centroids (median lat/lon).
     """
     if not _HAS_SK_BALLTREE:
         raise ImportError("scikit-learn BallTree is required for Haversine neighbors.")
@@ -292,13 +321,41 @@ def _build_neighbor_map_haversine(
     return neighbor_map
 
 
-def _append_rows_to_csv(rows: List[Dict], path: str, *, header_written_flag: Dict[str, bool]) -> None:
+# --------------------------------------------------------------------------- #
+# CSV progress logging
+# --------------------------------------------------------------------------- #
+
+def _append_rows_to_csv(rows: List[Dict[str, Any]], path: str, *, header_written_flag: Dict[str, bool]) -> None:
     if not rows or path is None:
         return
     tmp = pd.DataFrame(rows)
     first = (not header_written_flag.get(path, False))
     tmp.to_csv(path, mode="a", index=False, header=first)
     header_written_flag[path] = True
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic seeds & optional pool capping (to amplify inclusion effects)
+# --------------------------------------------------------------------------- #
+
+def _stable_int_seed(*parts: object) -> int:
+    """
+    Build a stable 32-bit integer seed from a tuple of hashable parts.
+    Ensures different, deterministic splits when include_target_pct changes.
+    """
+    import hashlib
+    s = "|".join(map(str, parts))
+    h = hashlib.blake2b(s.encode("utf-8"), digest_size=8).hexdigest()
+    return int(h, 16) % (2**32 - 1)
+
+
+def _cap_dataframe(df: pd.DataFrame, n_max: Optional[int], *, seed: int) -> pd.DataFrame:
+    """
+    Deterministically downsample df to at most n_max rows (if n_max is not None).
+    """
+    if n_max is None or n_max <= 0 or len(df) <= n_max:
+        return df
+    return df.sample(n=n_max, random_state=seed)
 
 
 # --------------------------------------------------------------------------- #
@@ -326,15 +383,21 @@ def evaluate_stations(
     station_ids: Optional[Iterable[Union[str, int]]] = None,
     regex: Optional[str] = None,
     custom_filter: Optional[Callable[[Union[str, int]], bool]] = None,
+    # eligibility (observed-based)
     min_station_rows: Optional[int] = None,
-    # neighborhood & leakage
+    # neighborhood & inclusion
     k_neighbors: Optional[int] = 20,
     neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]] = None,
-    include_target_pct: float = 0.0,       # 0 = exclude; 1..95 = include %
+    include_target_pct: float = 0.0,       # 0..95 (% of target's valid rows added to TRAIN)
     include_target_seed: int = 42,
     # model & metrics
-    rf_params: Optional[Union[RFParams, Dict]] = None,
+    rf_params: Optional[Union[RFParams, Dict[str, Any]]] = None,
     agg_for_metrics: str = "sum",
+    # optional train-set rebalancing (to make inclusion effects clearer)
+    rebalance_mode: str = "none",          # {"none","cap","weight"}
+    cap_max_pool_rows: Optional[int] = None,
+    target_weight: float = 5.0,            # used when rebalance_mode == "weight"
+    rebalance_seed: int = 13,
     # logging / UX
     show_progress: bool = False,
     log_csv: Optional[str] = None,
@@ -344,62 +407,22 @@ def evaluate_stations(
     parquet_compression: str = "snappy",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Evaluate one Random-Forest model per target station using either all other
-    stations or only its K nearest neighbors as the training pool. Optionally
-    include 1..95% of the target station's valid rows in training.
+    Station-wise evaluation of a Random-Forest imputer using ONLY spatial
+    (lat, lon, alt) and calendar features (year, month, day-of-year, optional cyclic).
 
-    Parameters
-    ----------
-    data : DataFrame
-        Long-format table with at least (id_col, date_col, lat_col, lon_col,
-        alt_col, target_col).
-    start, end : str or None
-        Optional inclusive window for analysis.
-    add_cyclic : bool
-        Add sin/cos seasonal features of day-of-year.
-    feature_cols : list[str] or None
-        Custom features to use. If None, defaults to coords + calendar (+cyclic).
-    prefix, station_ids, regex, custom_filter :
-        Optional filters to choose which stations to *evaluate* (OR semantics).
-        Training always uses the configured pool (neighbors vs. all), plus the
-        optional leakage fraction from the target.
-    min_station_rows : int or None
-        Require at least this number of valid rows per station to compute metrics.
-    k_neighbors : int or None
-        If provided and `neighbor_map` is None, builds a KNN map (haversine on
-        lat/lon) and trains each target model only on its neighbors (excluding
-        itself), plus optional leakage.
-    neighbor_map : dict or None
-        Precomputed `{station -> [neighbors...]}`. If provided, it overrides
-        `k_neighbors`.
-    include_target_pct : float
-        Percentage (0..95) of target station valid rows to *include in training*.
-        Use 0.0 to fully exclude target (LOSO-like).
-    include_target_seed : int
-        Random seed for sampling target rows when inclusion > 0.
-    rf_params : RFParams | dict | None
-        RF hyperparameters. Missing fields fall back to defaults.
-    agg_for_metrics : {"sum","mean","median"}
-        Aggregation for monthly/annual metrics.
-    show_progress : bool
-        Print per-station progress info.
-    log_csv : str or None
-        If provided, appends progress rows every `flush_every` stations.
-    save_table_path : str or None
-        If provided, saves the final *report* (.csv or .parquet depending on extension).
+    **Fixes & guarantees**
+    - `min_station_rows` is enforced on **observed target rows** in-window.
+    - Inclusion sampling is deterministic and depends on (station, pct, seed).
+    - Optional train rebalancing:
+        * "cap": downsample neighbor/all-others pool to `cap_max_pool_rows`.
+        * "weight": give `target_weight` to included target rows via sample_weight.
+    - Predictions table uses your `id_col` and `date_col`.
 
     Returns
     -------
     (report_df, predictions_df)
-        report_df : one row per evaluated station with metrics and metadata:
-            [station, n_rows, seconds, rows_train, rows_test,
-             MAE_d, RMSE_d, R2_d, MAE_m, RMSE_m, R2_m, MAE_y, RMSE_y, R2_y,
-             used_k_neighbors, include_target_pct,
-             latitude, longitude, altitude]
-            The latitude/longitude/altitude reported are the station medoids
-            (median of those columns for that station within the analyzed window).
-        predictions_df : per-row predictions:
-            [station, date, latitude, longitude, altitude, y_obs, y_mod]
+        report_df : one row per station with metrics and metadata
+        predictions_df : per-row predictions with observed & modeled values
     """
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
 
@@ -414,7 +437,7 @@ def evaluate_stations(
         feature_cols=feature_cols,
     )
 
-    # 2) Global valid mask for features+target (used to speed-up per-station slices)
+    # 2) Global valid mask for features+target (used later for train pool)
     valid_mask_global = ~df[feats + [target_col]].isna().any(axis=1)
 
     # 3) Determine stations to evaluate (OR over filters; default = all)
@@ -445,19 +468,27 @@ def evaluate_stations(
     seen = set()
     stations = [s for s in chosen if not (s in seen or seen.add(s))]
 
-    # 4) Optional minimum rows filter (counted on valid rows)
+    # 4) min_station_rows based on **observed target rows** (windowed)
     if min_station_rows is not None:
-        valid_counts = df.loc[valid_mask_global, [id_col]].groupby(id_col).size().astype(int)
-        stations_before = len(stations)
-        stations = [s for s in stations if int(valid_counts.get(s, 0)) >= int(min_station_rows)]
-        if show_progress and stations_before != len(stations):
-            tqdm.write(f"Filtered by min_station_rows={min_station_rows}: {stations_before} → {len(stations)} stations")
+        obs_counts = (
+            df[[id_col, date_col, target_col]]
+            .dropna(subset=[target_col])
+            .groupby(id_col, sort=False)
+            .size()
+            .astype(int)
+        )
+        before = len(stations)
+        stations = [s for s in stations if int(obs_counts.get(s, 0)) >= int(min_station_rows)]
+        if show_progress and before != len(stations):
+            tqdm.write(
+                f"Filtered by min_station_rows(observed)={min_station_rows}: "
+                f"{before} → {len(stations)} stations"
+            )
 
     # 5) Neighbor map
-    used_k = None
+    used_k: Optional[int] = None
     if neighbor_map is not None:
         nmap = neighbor_map
-        used_k = None  # user-provided list lengths may vary
     elif k_neighbors is not None:
         nmap = _build_neighbor_map_haversine(
             df, id_col=id_col, lat_col=lat_col, lon_col=lon_col, k=int(k_neighbors), include_self=False
@@ -465,7 +496,6 @@ def evaluate_stations(
         used_k = int(k_neighbors)
     else:
         nmap = None
-        used_k = None
 
     # 6) RF params (dict or dataclass)
     if rf_params is None:
@@ -479,24 +509,30 @@ def evaluate_stations(
 
     # 7) Iterate over stations and fit/predict
     header_flag: Dict[str, bool] = {}
-    pending_rows: List[Dict] = []
-    rows_report: List[Dict] = []
+    pending_rows: List[Dict[str, Any]] = []
+    rows_report: List[Dict[str, Any]] = []
     all_preds: List[pd.DataFrame] = []
 
     iterator = tqdm(stations, desc="Evaluating stations", unit="st") if show_progress else stations
 
-    # Pre-compute station medoids to be included in the report
+    # Pre-compute station medoids for metadata
     medoids = (
         df.groupby(id_col)[[lat_col, lon_col, alt_col]]
         .median()
         .rename(columns={lat_col: "latitude", lon_col: "longitude", alt_col: "altitude"})
     )
 
+    # Clamp inclusion% once and validate rebalancing mode
+    include_target_pct = max(0.0, min(float(include_target_pct), 95.0))
+    if rebalance_mode not in {"none", "cap", "weight"}:
+        raise ValueError("rebalance_mode must be one of {'none','cap','weight'}")
+    if rebalance_mode == "weight" and target_weight < 1.0:
+        raise ValueError("When rebalance_mode='weight', target_weight must be >= 1.0")
+
     for sid in iterator:
         t0 = pd.Timestamp.utcnow().timestamp()
 
-        # --- Leak-free split for the target station -------------------------
-        # Valid rows of the target station (candidates to include in train or to test)
+        # Valid rows for this target station (candidates to include OR to test)
         is_target = (df[id_col] == sid)
         target_valid = df.loc[is_target & valid_mask_global]
 
@@ -520,7 +556,7 @@ def evaluate_stations(
                 _append_rows_to_csv(pending_rows, log_csv, header_written_flag=header_flag)
                 pending_rows = []
             if show_progress:
-                tqdm.write(f"Station {sid}: 0 valid test rows (skipped)")
+                tqdm.write(f"{sid}: 0 valid test rows (skipped)")
             continue
 
         # Training pool: all others or neighbors-only (strictly excluding target)
@@ -529,12 +565,11 @@ def evaluate_stations(
             train_pool_mask = df[id_col].isin(neigh_ids) & (~is_target)
         else:
             train_pool_mask = ~is_target
-        train_pool = df.loc[train_pool_mask & valid_mask_global]
+        pool_df = df.loc[train_pool_mask & valid_mask_global]
 
-        # Controlled inclusion without leakage: the included rows are removed from test
-        pct = max(0.0, min(float(include_target_pct), 95.0))
-        if pct > 0.0:
-            n_take = int(np.ceil(len(target_valid) * (pct / 100.0)))
+        # --- Deterministic inclusion sampling (pct-dependent) ----------------
+        if include_target_pct > 0.0:
+            n_take = int(np.ceil(len(target_valid) * (include_target_pct / 100.0)))
             # Keep at least one row for test if possible
             if len(target_valid) > 1:
                 n_take = min(n_take, len(target_valid) - 1)
@@ -544,26 +579,33 @@ def evaluate_stations(
             n_take = 0
 
         if n_take > 0:
-            sample_idx = target_valid.sample(n=n_take, random_state=int(include_target_seed)).index
+            rs = _stable_int_seed(sid, int(round(include_target_pct * 1000)), include_target_seed)
+            sample_idx = target_valid.sample(n=n_take, random_state=rs).index
             inc_target_df = target_valid.loc[sample_idx]
             test_df = target_valid.drop(index=sample_idx)
         else:
             inc_target_df = target_valid.iloc[0:0]
             test_df = target_valid
 
-        # Final train = pool (neighbors/others) + included slice of the target
-        train_df = pd.concat([train_pool, inc_target_df], axis=0, copy=False)
+        # Optional rebalancing of the pool
+        if rebalance_mode == "cap":
+            # Downsample the pool to make train sizes comparable across pct values
+            rs_pool = _stable_int_seed(sid, "pool", rebalance_seed, include_target_pct)
+            pool_df = _cap_dataframe(pool_df, cap_max_pool_rows, seed=rs_pool)
 
-        if train_df.empty:
+        # Final train = pool (+ optional included target)
+        train_df = pd.concat([pool_df, inc_target_df], axis=0, copy=False)
+
+        if train_df.empty or test_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
-                "station": sid, "n_rows": 0, "seconds": sec,
-                "rows_train": 0, "rows_test": int(len(test_df)),
+                "station": sid, "n_rows": int(len(test_df)), "seconds": sec,
+                "rows_train": int(len(train_df)), "rows_test": int(len(test_df)),
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
                 "used_k_neighbors": used_k,
-                "include_target_pct": float(pct),
+                "include_target_pct": float(include_target_pct),
                 "latitude": float(medoids.loc[sid, "latitude"]) if sid in medoids.index else np.nan,
                 "longitude": float(medoids.loc[sid, "longitude"]) if sid in medoids.index else np.nan,
                 "altitude": float(medoids.loc[sid, "altitude"]) if sid in medoids.index else np.nan,
@@ -574,7 +616,7 @@ def evaluate_stations(
                 _append_rows_to_csv(pending_rows, log_csv, header_written_flag=header_flag)
                 pending_rows = []
             if show_progress:
-                tqdm.write(f"Station {sid}: empty train (skipped)")
+                tqdm.write(f"{sid}: empty train or test (skipped)")
             continue
 
         # --- Fit & predict ---------------------------------------------------
@@ -584,12 +626,20 @@ def evaluate_stations(
         X_test = test_df[feats].to_numpy(copy=False)
         y_test = test_df[target_col].to_numpy(copy=False)
 
-        model.fit(X_train, y_train)
+        # Optional weighting of included target rows
+        sample_weight = None
+        if rebalance_mode == "weight" and len(inc_target_df) > 0 and target_weight > 1.0:
+            w = np.ones(len(train_df), dtype=float)
+            inc_mask = train_df.index.isin(inc_target_df.index)
+            w[inc_mask] = float(target_weight)
+            sample_weight = w
+
+        model.fit(X_train, y_train, sample_weight=sample_weight)
         y_hat = model.predict(X_test)
 
-        # Per-row predictions with canonical names
+        # Per-row predictions with canonical names (use id_col name)
         pred_df = pd.DataFrame({
-            "station": sid,
+            id_col: sid,
             date_col: test_df[date_col].values,
             "latitude": test_df[lat_col].astype(float).values,
             "longitude": test_df[lon_col].astype(float).values,
@@ -598,10 +648,8 @@ def evaluate_stations(
             "y_mod": y_hat,
         })
 
-        # Metrics (daily)
+        # Metrics
         daily = _safe_metrics(pred_df["y_obs"].values, pred_df["y_mod"].values)
-
-        # Monthly / Annual aggregates (optional completeness)
         monthly, _ = _aggregate_and_score(
             pred_df, date_col=date_col, y_col="y_obs", yhat_col="y_mod", freq="M", agg=agg_for_metrics
         )
@@ -626,7 +674,7 @@ def evaluate_stations(
             "RMSE_y": float(annual["RMSE"]),
             "R2_y": float(annual["R2"]) if annual["R2"] == annual["R2"] else np.nan,
             "used_k_neighbors": used_k,
-            "include_target_pct": float(pct),
+            "include_target_pct": float(include_target_pct),
             "latitude": float(medoids.loc[sid, "latitude"]) if sid in medoids.index else np.nan,
             "longitude": float(medoids.loc[sid, "longitude"]) if sid in medoids.index else np.nan,
             "altitude": float(medoids.loc[sid, "altitude"]) if sid in medoids.index else np.nan,
@@ -641,8 +689,8 @@ def evaluate_stations(
 
         if show_progress:
             tqdm.write(
-                f"Station {sid}: {sec:.2f}s  "
-                f"(train={len(train_df):,}  test={len(test_df):,}  incl={pct:.1f}%)  "
+                f"{sid}: {sec:.2f}s  (train={len(train_df):,}  test={len(test_df):,}  "
+                f"incl={include_target_pct:.1f}%  k={used_k})  "
                 f"MAE_d={daily['MAE']:.3f} RMSE_d={daily['RMSE']:.3f} R2_d={daily['R2']:.3f}"
             )
 
@@ -676,4 +724,8 @@ def evaluate_stations(
 __all__ = [
     "RFParams",
     "evaluate_stations",
+    "_require_columns",
+    "_ensure_datetime_naive",
+    "_add_time_features",
+    "_build_neighbor_map_haversine",
 ]
