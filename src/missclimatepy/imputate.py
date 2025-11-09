@@ -30,6 +30,12 @@ Exactly these columns, in order:
 [station, date, latitude, longitude, altitude, <target>, source]
 with `source` ∈ {"observed", "imputed"}.
 
+Persistence
+-----------
+Use the new parameters `save_path`, `save_format`, `save_index`, and `save_partitions`
+to write results automatically in CSV or Parquet. If `save_partitions=True`, one file
+per station is written (suffix `_station=<ID>` for CSV; directory partitioning for Parquet).
+
 Example
 -------
 >>> from missclimatepy.imputate import impute_dataset
@@ -44,6 +50,9 @@ Example
 ...     rf_params=RFParams(n_estimators=300, max_depth=30, n_jobs=-1, random_state=42),
 ...     min_station_rows=None,   # MDR uses 1826 by default
 ...     show_progress=True,
+...     save_path="outputs/tmin_imputed.parquet",  # autosave
+...     save_format="auto",                        # infer from extension
+...     save_partitions=False,                     # single file
 ... )
 >>> out.columns.tolist()
 ['station','date','latitude','longitude','altitude','tmin','source']
@@ -52,7 +61,10 @@ Example
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union, Literal
+
+#import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -72,6 +84,120 @@ except Exception:  # pragma: no cover
     def tqdm(x, **kwargs):
         return x  # transparent iterator
 
+
+# ------------------------- internal: persistence helpers ------------------------- #
+
+def _infer_format_from_path(path: str) -> Literal["csv", "parquet"]:
+    p = path.lower()
+    if p.endswith(".parquet"):
+        return "parquet"
+    if p.endswith(".csv") or p.endswith(".csv.gz") or p.endswith(".csv.bz2") or p.endswith(".csv.xz") or p.endswith(".csv.zip"):
+        return "csv"
+    # Default to CSV if unclear (user can override with save_format)
+    return "csv"  # conservative
+
+
+def _ensure_parent_dir(path: Path) -> None:
+    parent = path.parent
+    if parent and not parent.exists():
+        parent.mkdir(parents=True, exist_ok=True)
+
+
+def _write_csv(df: pd.DataFrame, dest: Path, *, index: bool) -> None:
+    _ensure_parent_dir(dest)
+    # compression inferred by pandas from suffix; dtype-safe already
+    df.to_csv(dest, index=index)
+
+
+def _write_parquet(df: pd.DataFrame, dest: Path, *, index: bool) -> None:
+    _ensure_parent_dir(dest)
+    df.to_parquet(dest, index=index)
+
+
+def _write_partitions(
+    df: pd.DataFrame,
+    *,
+    station_col: str,
+    base_path: Path,
+    fmt: Literal["csv", "parquet"],
+    index: bool,
+) -> None:
+    """
+    Write one file (CSV/Parquet) per station. For Parquet, writes into
+    base_path / f"station={sid}/part.parquet" (Hive-like partitions).
+    For CSV, writes base_path with suffix *_station=<sid>.csv[.gz].
+    """
+    if fmt == "parquet":
+        # Partitioned folders: base/station=<sid>/part.parquet
+        for sid, sdf in df.groupby(station_col, sort=False):
+            part_dir = base_path / f"station={sid}"
+            _ensure_parent_dir(part_dir / "part.parquet")
+            sdf.to_parquet(part_dir / "part.parquet", index=index)
+    else:
+        # CSV per station with suffix
+        base = str(base_path)
+        # Keep any compression extension if present
+        # e.g., "out.csv.gz" → "out_station=S123.csv.gz"
+        for sid, sdf in df.groupby(station_col, sort=False):
+            if base.lower().endswith(".csv"):
+                out_name = base[:-4] + f"_station={sid}.csv"
+            elif any(base.lower().endswith(ext) for ext in (".csv.gz", ".csv.bz2", ".csv.xz", ".csv.zip")):
+                # split at ".csv" and keep the rest (e.g., ".gz")
+                pos = base.lower().rfind(".csv")
+                out_name = base[:pos] + f"_station={sid}" + base[pos:]
+            else:
+                # no extension -> add .csv
+                out_name = base + f"_station={sid}.csv"
+            dest = Path(out_name)
+            _ensure_parent_dir(dest)
+            sdf.to_csv(dest, index=index)
+
+
+def _save_result_df(
+    df: pd.DataFrame,
+    *,
+    path: Optional[str],
+    fmt: Literal["csv", "parquet", "auto"],
+    index: bool,
+    partition: bool,
+    station_col: str,
+) -> None:
+    """
+    Save the imputed DataFrame if `path` is provided. No-op if `path` is None.
+    """
+    if path is None:
+        return
+
+    base = Path(path)
+    # Decide format
+    if fmt == "auto":
+        fmt_resolved = _infer_format_from_path(str(base))
+    else:
+        fmt_resolved = fmt
+
+    if fmt_resolved not in ("csv", "parquet"):
+        raise ValueError(f"Unsupported save_format '{fmt}'. Use 'csv', 'parquet', or 'auto'.")
+
+    # Basic schema validation (columns are required by contract)
+    required = {"station", "date", "latitude", "longitude", "altitude", "source"}
+    if not required.issubset(df.columns):
+        raise ValueError(
+            "Result schema missing required columns for saving. "
+            f"Expected to include: {sorted(required)}; got: {list(df.columns)[:10]}..."
+        )
+
+    if partition:
+        _write_partitions(df, station_col=station_col, base_path=base, fmt=fmt_resolved, index=index)
+        return
+
+    # Single file
+    if fmt_resolved == "parquet":
+        _write_parquet(df, base, index=index)
+    else:
+        _write_csv(df, base, index=index)
+
+
+# ------------------------------ public imputation API ------------------------------ #
 
 def impute_dataset(
     data: pd.DataFrame,
@@ -103,10 +229,15 @@ def impute_dataset(
     rf_params: Optional[Union[RFParams, Dict]] = None,
     # logging
     show_progress: bool = False,
+    # persistence
+    save_path: Optional[str] = None,
+    save_format: Literal["csv", "parquet", "auto"] = "auto",
+    save_index: bool = False,
+    save_partitions: bool = False,
 ) -> pd.DataFrame:
     """
     Impute the target time series for *selected* stations over [start, end]
-    and return a minimal long-format DataFrame.
+    and return a minimal long-format DataFrame. Optionally save the result.
 
     MDR (eligibility)
     -----------------
@@ -146,6 +277,20 @@ def impute_dataset(
     show_progress : bool
         If True, prints compact progress lines (requires `tqdm`).
 
+    save_path : str or None
+        If provided, write the resulting DataFrame to this path.
+        - If `save_format="auto"`, the format is inferred by extension:
+          *.parquet → Parquet; *.csv[.gz|.bz2|.xz|.zip] → CSV.
+        - Parent directories are created if needed.
+    save_format : {"csv","parquet","auto"}
+        File format to write. Use "auto" to infer from extension.
+    save_index : bool
+        Whether to write the DataFrame index.
+    save_partitions : bool
+        If True, write **one file per station**.
+        - Parquet: base_dir / "station=<ID>/part.parquet"
+        - CSV: base_name → base_name + "_station=<ID>.csv[.gz]"
+
     Returns
     -------
     DataFrame
@@ -158,6 +303,7 @@ def impute_dataset(
     - Only the target variable is modeled and returned.
     - Coordinates in the output are station-level medoids (median per station).
     - Determinism depends on `rf_params.random_state`.
+    - Saving is best-effort and raises a clear ValueError on unsupported formats.
     """
     # ---- basic validation & windowing ---------------------------------------
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
@@ -215,7 +361,6 @@ def impute_dataset(
     user_mdr = int(min_station_rows) if (min_station_rows is not None) else 0
     MDR_MIN = max(base_mdr, user_mdr)
 
-    # Count observed (non-NaN) target rows per station within window
     observed_mask = ~df[target_col].isna()
     obs_counts = df.loc[observed_mask].groupby(id_col, sort=False)[target_col].size().astype(int)
 
@@ -229,7 +374,17 @@ def impute_dataset(
     stations = eligible
 
     if not stations:
-        return pd.DataFrame(columns=[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"])
+        empty = pd.DataFrame(columns=[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"])
+        # still honor save_path if user wants an empty scaffold written
+        _save_result_df(
+            empty,
+            path=save_path,
+            fmt=save_format,
+            index=save_index,
+            partition=save_partitions,
+            station_col=id_col,
+        )
+        return empty
 
     # ---- neighbor map / training pool ---------------------------------------
     if neighbor_map is not None:
@@ -302,7 +457,7 @@ def impute_dataset(
         train_df = pd.concat([train_pool, st_valid], axis=0, ignore_index=True)
 
         if train_df.empty:
-            # Should not happen for MDR-eligible stations, but guard anyway
+            # Guard: return observed-only rows as minimal block
             y_obs = merged[target_col].to_numpy()
             out = pd.DataFrame({
                 id_col: sid,
@@ -360,5 +515,15 @@ def impute_dataset(
 
     # Ensure exact column order
     result = result[[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"]]
-    return result
 
+    # --------- optional saving ---------
+    _save_result_df(
+        result,
+        path=save_path,
+        fmt=save_format,
+        index=save_index,
+        partition=save_partitions,
+        station_col=id_col,
+    )
+
+    return result
