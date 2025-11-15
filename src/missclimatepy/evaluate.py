@@ -5,43 +5,58 @@ missclimatepy.evaluate
 
 Station-wise evaluation for climate-data imputation using ONLY spatial
 coordinates (latitude, longitude, altitude) and calendar features
-(year, month, day-of-year, optional cyclic sin/cos).
+(year, month, day-of-year, optional cyclic sin/cos). One Random-Forest
+model is trained per target station, using either all other stations or
+the K nearest neighbors (by haversine distance on lat/lon), with optional
+controlled inclusion ("leakage") of a fraction of the target station's
+own valid rows.
 
-Design
-------
-* One RandomForestRegressor **per target station**.
-* Training pool = either:
-    - all other stations, or
-    - K nearest neighbors by Haversine on (lat, lon).
-* Optional, leakage-controlled inclusion of a fraction of the **target
-  station's own valid rows** into TRAINING. Any included rows are removed
-  from the TEST set to avoid information leakage.
+Key design choices
+------------------
+- Generic schema: the caller provides the column names (no enforced renaming).
+- Local models: one RandomForest per station; training pool can be neighbors.
+- Controlled inclusion: include 0..95% of the target station's valid rows into
+  training to adapt locally; 0% means strict LOSO-like exclusion.
+- Precipitation-friendly sampling: when `include_target_pct > 0`, the rows
+  taken from the target station are drawn using a *month × dry/wet* stratified
+  scheme to avoid oversampling dry days and making the test set artificially
+  harder (a common issue with rainfall time series).
+- Metrics: daily MAE, RMSE, R² + monthly and yearly aggregates (sum/mean/median).
+- Outputs:
+  (1) station-level report with metrics, sizes, medoid coordinates; and
+  (2) full per-row predictions:
+      [station, date, latitude, longitude, altitude, y_obs, y_mod]
 
-What you get
-------------
-* report_df: one row per evaluated station, including sizes and metrics
-  at daily / monthly / annual levels:
-    ['station','n_rows','seconds','rows_train','rows_test',
-     'MAE_d','RMSE_d','R2_d','MAE_m','RMSE_m','R2_m','MAE_y','RMSE_y','R2_y',
-     'used_k_neighbors','include_target_pct','latitude','longitude','altitude']
-* preds_df: per-row predictions for the test slice:
-    ['station', <date_col>, 'latitude','longitude','altitude','y_obs','y_mod']
-
-Key parameters
---------------
-* `min_station_rows`: Minimum amount of observed data required to evaluate a
-  station. By default we count **observed target rows** within [start, end].
-  You can switch to "valid-features" counting if desired.
-* `include_target_pct` (0..95): fraction of the target's valid rows (within
-  the window) **included into TRAINING only**; those rows are removed from TEST.
-  As `include_target_pct` increases, TRAIN grows and TEST shrinks (with at
-  least one test row kept when possible).
+Typical usage
+-------------
+>>> from missclimatepy.evaluate import evaluate_stations, RFParams
+>>> rep, preds = evaluate_stations(
+...     data=df,
+...     id_col="station", date_col="date",
+...     lat_col="latitude", lon_col="longitude", alt_col="altitude",
+...     target_col="tmin",
+...     start="1991-01-01", end="2020-12-31",
+...     k_neighbors=20, include_target_pct=20.0,
+...     rf_params=RFParams(n_estimators=100, max_depth=30, n_jobs=-1, random_state=42),
+...     show_progress=True,
+... )
 
 Notes
 -----
-* Generic schema: you pass the column names.
-* No external covariates required.
-* Determinism via RF random_state + inclusion sampling seed.
+- If you pass `neighbor_map`, it overrides `k_neighbors`.
+  The map should be a dict {station_id -> list_of_neighbor_ids}.
+- Haversine neighbors use latitude/longitude only (as required by the metric).
+  Altitude remains a regression feature.
+- Memory behavior: features/masks are prepared once; each station fits its
+  own RF on array views. Optional per-station progress logging is supported.
+
+This module also exposes lightweight internal helpers that are reused by
+`missclimatepy.imputate`:
+
+- `_require_columns`
+- `_ensure_datetime_naive`
+- `_add_time_features`
+- `_build_neighbor_map_haversine`
 """
 
 from __future__ import annotations
@@ -79,14 +94,21 @@ class RFParams:
     Parameters
     ----------
     n_estimators : int
+        Number of trees in the forest.
     max_depth : int | None
+        Maximum depth of each tree. None means fully expanded.
     min_samples_split : int
+        Minimum number of samples required to split an internal node.
     min_samples_leaf : int
-    max_features : str | int | float | None
-        For modern scikit-learn, preferred strings are {"sqrt","log2"} or None.
+        Minimum number of samples required to be at a leaf node.
+    max_features : {"sqrt","log2"} | int | float | None
+        Number of features to consider when looking for the best split.
     bootstrap : bool
+        Whether bootstrap samples are used when building trees.
     n_jobs : int
+        Number of parallel jobs for `fit` and `predict`. -1 = all cores.
     random_state : int
+        Seed for reproducibility.
     """
     n_estimators: int = 100
     max_depth: Optional[int] = None
@@ -99,10 +121,16 @@ class RFParams:
 
 
 # --------------------------------------------------------------------------- #
-# Internal helpers
+# Internal helpers (reused by imputate.py)
 # --------------------------------------------------------------------------- #
 
 def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
+    """
+    Raise a ValueError if any of the requested columns is missing.
+
+    This is intentionally strict and used early to provide clearer error
+    messages to end users.
+    """
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise ValueError(
@@ -114,27 +142,46 @@ def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
 def _ensure_datetime_naive(s: pd.Series) -> pd.Series:
     """
     Ensure a naive (timezone-free) datetime64[ns] series.
+
+    - Coerces parseable values with `errors="coerce"`.
+    - Drops timezones if present (tz-aware series are converted to naive).
     """
     s = pd.to_datetime(s, errors="coerce")
     # Avoid deprecated is_datetime64tz_dtype; check dtype class instead
-    if isinstance(s.dtype, pd.DatetimeTZDtype):  # type: ignore[attr-defined]
+    if isinstance(s.dtype, pd.DatetimeTZDtype):
         s = s.dt.tz_localize(None)
     return s
 
 
 def _add_time_features(df: pd.DataFrame, date_col: str, add_cyclic: bool = False) -> pd.DataFrame:
+    """
+    Add standard calendar features derived from `date_col`:
+
+    - year  (int32)
+    - month (int16)
+    - doy   (day of year, int16)
+
+    If `add_cyclic=True`, also adds:
+    - doy_sin, doy_cos : sin/cos transforms of day-of-year on a 365.25-day cycle.
+    """
     out = df.copy()
+    out[date_col] = _ensure_datetime_naive(out[date_col])
     out["year"] = out[date_col].dt.year.astype("int32", copy=False)
     out["month"] = out[date_col].dt.month.astype("int16", copy=False)
     out["doy"] = out[date_col].dt.dayofyear.astype("int16", copy=False)
     if add_cyclic:
-        # 365.25 to keep leap-years roughly consistent
-        out["doy_sin"] = np.sin(2.0 * np.pi * out["doy"].to_numpy() / 365.25)
-        out["doy_cos"] = np.cos(2.0 * np.pi * out["doy"].to_numpy() / 365.25)
+        # 365.25 keeps leap-years roughly consistent
+        two_pi = 2.0 * np.pi
+        doy_arr = out["doy"].to_numpy()
+        out["doy_sin"] = np.sin(two_pi * doy_arr / 365.25)
+        out["doy_cos"] = np.cos(two_pi * doy_arr / 365.25)
     return out
 
 
 def _rmse_manual(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    Simple RMSE implementation that stays robust to empty inputs.
+    """
     if y_true.size == 0:
         return np.nan
     diff = y_true - y_pred
@@ -143,7 +190,10 @@ def _rmse_manual(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 def _safe_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     """
-    Compute MAE/RMSE/R² robustly; return NaN for degenerate/short cases.
+    Compute MAE/RMSE/R² robustly; return NaN for degenerate or short cases.
+
+    - If the series is empty, all metrics are NaN.
+    - If variance(y_true) == 0 or length < 2, R² is set to NaN.
     """
     if y_true.size == 0 or y_pred.size == 0:
         return {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan}
@@ -162,7 +212,10 @@ _FREQ_ALIAS = {"M": "MS", "A": "YS", "Y": "YS", "Q": "QS"}
 def _freq_alias(freq: str) -> str:
     """
     Normalize frequency short-hands to start-period codes:
-    M -> MS; Y/A -> YS; Q -> QS.
+
+    - "M" → "MS" (month start)
+    - "Y"/"A" → "YS" (year start)
+    - "Q" → "QS" (quarter start)
     """
     return _FREQ_ALIAS.get(freq, freq)
 
@@ -183,11 +236,27 @@ def _aggregate_and_score(
     agg: str = "sum",
 ) -> Tuple[Dict[str, float], pd.DataFrame]:
     """
-    Aggregate to a given frequency and score on the overlap.
+    Aggregate predictions to a given temporal frequency and compute metrics.
+
+    Parameters
+    ----------
+    df_pred : DataFrame
+        Per-row predictions including columns [date_col, y_col, yhat_col].
+    date_col : str
+        Name of the datetime column.
+    y_col, yhat_col : str
+        Names of observed and predicted columns.
+    freq : str
+        Pandas offset alias (e.g., "M", "YS", "Q"). Short forms are normalized.
+    agg : {"sum","mean","median"}
+        Aggregation used for both observed and predicted series.
 
     Returns
     -------
-    (metrics_dict, aggregated_dataframe)
+    metrics : dict
+        Dictionary with keys {"MAE","RMSE","R2"}.
+    agg_df : DataFrame
+        Aggregated table at the requested frequency.
     """
     freq = _freq_alias(freq=freq)
     op = _agg_op(agg)
@@ -220,8 +289,19 @@ def _preprocess_once(
     feature_cols: Optional[Sequence[str]],
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Single-pass preprocessing: datetime, optional clipping, time features,
-    and feature list assembly. Returns (prepared_df, features_list).
+    Single-pass preprocessing:
+
+    - Convert `date_col` to naive datetime.
+    - Optionally clip data to [start, end].
+    - Add calendar features.
+    - Assemble and validate the feature list.
+
+    Returns
+    -------
+    prepared_df : DataFrame
+        Subset of columns needed for evaluation.
+    features_list : list[str]
+        Names of feature columns used for modeling.
     """
     df = data.copy()
     df[date_col] = _ensure_datetime_naive(df[date_col])
@@ -241,6 +321,7 @@ def _preprocess_once(
     else:
         feats = list(feature_cols)
 
+    # Keep only the necessary columns (and ensure uniqueness)
     keep = sorted(set([id_col, date_col, lat_col, lon_col, alt_col, target_col] + feats))
     df = df[keep]
     return df, feats
@@ -258,6 +339,23 @@ def _build_neighbor_map_haversine(
     """
     Construct a neighbor map {station -> [neighbors...]} using Haversine KNN
     over per-station (median) centroids on (latitude, longitude).
+
+    Parameters
+    ----------
+    df : DataFrame
+        Prepared dataframe containing at least [id_col, lat_col, lon_col].
+    id_col, lat_col, lon_col : str
+        Column names for station id and geographic coordinates.
+    k : int
+        Number of neighbors to retain per station.
+    include_self : bool
+        If True, the station itself may appear in its neighbor list
+        (and will be trimmed to exactly k). If False, self is removed.
+
+    Returns
+    -------
+    dict
+        Mapping from station id to list of neighbor station ids.
     """
     if not _HAS_SK_BALLTREE:
         raise ImportError("scikit-learn BallTree is required for Haversine neighbors.")
@@ -290,25 +388,16 @@ def _build_neighbor_map_haversine(
 
 
 def _append_rows_to_csv(rows: List[Dict], path: str, *, header_written_flag: Dict[str, bool]) -> None:
+    """
+    Append a list of dict rows to CSV in one shot, writing the header only once.
+    """
     if not rows or path is None:
         return
     tmp = pd.DataFrame(rows)
     first = (not header_written_flag.get(path, False))
     tmp.to_csv(path, mode="a", index=False, header=first)
     header_written_flag[path] = True
-
-
-def _concat_index(parts: List[pd.Index]) -> pd.Index:
-    """
-    Concatenate a list of Index objects safely, ignoring empties.
-    Avoids pandas' FutureWarning about empty entries in concatenation.
-    """
-    clean = [ix for ix in parts if len(ix) > 0]
-    if not clean:
-        return pd.Index([])
-    if len(clean) == 1:
-        return clean[0]
-    return pd.Index(np.concatenate([ix.values for ix in clean]))
+    rows.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -336,13 +425,11 @@ def evaluate_stations(
     station_ids: Optional[Iterable[Union[str, int]]] = None,
     regex: Optional[str] = None,
     custom_filter: Optional[Callable[[Union[str, int]], bool]] = None,
-    # minimum data requirement
     min_station_rows: Optional[int] = None,
-    min_station_rows_mode: str = "observed",   # {"observed", "valid_features"}
     # neighborhood & leakage
     k_neighbors: Optional[int] = 20,
     neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]] = None,
-    include_target_pct: float = 0.0,           # 0 = exclude; 1..95 = include %
+    include_target_pct: float = 0.0,       # 0 = exclude; 1..95 = include %
     include_target_seed: int = 42,
     # model & metrics
     rf_params: Optional[Union[RFParams, Dict]] = None,
@@ -358,8 +445,19 @@ def evaluate_stations(
     """
     Evaluate one Random-Forest model per target station using either all other
     stations or only its K nearest neighbors as the training pool. Optionally
-    include 1..95% of the target station's valid rows in training. Any target
-    rows included in training are REMOVED from testing to avoid leakage.
+    include 1..95% of the target station's valid rows in training.
+
+    The inclusion of target rows is handled with a *precipitation-friendly*
+    scheme: when `include_target_pct > 0`, the target rows are sampled in a
+    month × dry/wet stratified manner, so that:
+
+    - The distribution of months in train and test remains similar.
+    - The ratio of dry days (target == 0) to wet days (target > 0) is preserved
+      as much as possible.
+
+    This avoids the common pitfall where random sampling over-represents dry
+    days in training and leaves a disproportionate share of wet/extreme events
+    in the test set, artificially degrading RMSE/R² as inclusion increases.
 
     Parameters
     ----------
@@ -374,13 +472,12 @@ def evaluate_stations(
         Custom features to use. If None, defaults to coords + calendar (+cyclic).
     prefix, station_ids, regex, custom_filter :
         Optional filters to choose which stations to *evaluate* (OR semantics).
+        Training always uses the configured pool (neighbors vs. all), plus the
+        optional stratified leakage fraction from the target.
     min_station_rows : int or None
-        Minimum amount of data required to evaluate a station, counted according
-        to `min_station_rows_mode`:
-          - "observed": number of observed (non-NaN) target rows in [start,end]
-          - "valid_features": number of rows having all features + target present
-    min_station_rows_mode : {"observed","valid_features"}
-        See above. Default "observed".
+        Minimum number of **observed (non-NaN)** target rows required per
+        station in the [start, end] window. Stations with fewer observations
+        are skipped. When `show_progress=True`, a brief summary is printed.
     k_neighbors : int or None
         If provided and `neighbor_map` is None, builds a KNN map (haversine on
         lat/lon) and trains each target model only on its neighbors (excluding
@@ -390,9 +487,11 @@ def evaluate_stations(
         `k_neighbors`.
     include_target_pct : float
         Percentage (0..95) of target station valid rows to *include in training*.
-        Use 0.0 to fully exclude target (LOSO-like).
+        Use 0.0 to fully exclude target (LOSO-like). When > 0, a stratified
+        sampler is used per station.
     include_target_seed : int
-        Random seed for sampling target rows when inclusion > 0.
+        Random seed for stratified sampling of target rows when
+        `include_target_pct > 0`.
     rf_params : RFParams | dict | None
         RF hyperparameters. Missing fields fall back to defaults.
     agg_for_metrics : {"sum","mean","median"}
@@ -407,8 +506,17 @@ def evaluate_stations(
     Returns
     -------
     (report_df, predictions_df)
-        report_df : one row per evaluated station with metrics and metadata.
-        predictions_df : per-row predictions for the held-out (test) rows.
+        report_df : one row per evaluated station with metrics and metadata:
+            [station, n_rows, seconds, rows_train, rows_test,
+             MAE_d, RMSE_d, R2_d, MAE_m, RMSE_m, R2_m,
+             MAE_y, RMSE_y, R2_y,
+             used_k_neighbors, include_target_pct,
+             latitude, longitude, altitude]
+            The latitude/longitude/altitude reported are the station medoids
+            (median of those columns for that station within the analyzed window).
+
+        predictions_df : per-row predictions:
+            [station, date, latitude, longitude, altitude, y_obs, y_mod]
     """
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
 
@@ -423,7 +531,7 @@ def evaluate_stations(
         feature_cols=feature_cols,
     )
 
-    # 2) Global valid mask for features+target (used to speed-up per-station slices)
+    # 2) Global valid mask for features+target (used for training / test splits)
     valid_mask_global = ~df[feats + [target_col]].isna().any(axis=1)
 
     # 3) Determine stations to evaluate (OR over filters; default = all)
@@ -450,35 +558,24 @@ def evaluate_stations(
     if not chosen:
         chosen = all_ids
 
-    # Unique in stable order
+    # Unique station ids in stable order
     seen = set()
     stations = [s for s in chosen if not (s in seen or seen.add(s))]
 
-    # 4) Optional minimum rows filter
+    # 4) Optional minimum rows filter (based on observed target, NOT valid_mask)
     if min_station_rows is not None:
-        mode = str(min_station_rows_mode).lower().strip()
-        if mode not in {"observed", "valid_features"}:
-            raise ValueError("min_station_rows_mode must be 'observed' or 'valid_features'.")
-
-        if mode == "observed":
-            # Count observed (non-NaN target) rows in the window
-            obs_counts = df[~df[target_col].isna()].groupby(id_col, sort=False)[target_col].size().astype(int)
-            def count_get(sid):
-                return int(obs_counts.get(sid, 0))
-            label = "observed"
-        else:
-            # Count rows that have all features + target present
-            valid_counts = df.loc[valid_mask_global, [id_col]].groupby(id_col, sort=False).size().astype(int)
-            def count_get(sid):
-                return int(valid_counts.get(sid, 0))
-            label = "valid_features"
-
+        obs_counts = (
+            df.loc[~df[target_col].isna(), [id_col, target_col]]
+            .groupby(id_col)[target_col]
+            .size()
+            .astype(int)
+        )
         before = len(stations)
-        stations = [s for s in stations if count_get(s) >= int(min_station_rows)]
-        after = len(stations)
-        if show_progress and before != after:
+        stations = [s for s in stations if int(obs_counts.get(s, 0)) >= int(min_station_rows)]
+        if show_progress and before != len(stations):
             tqdm.write(
-                f"Filtered by min_station_rows({label})={int(min_station_rows)}: {before} → {after} stations"
+                f"Filtered by min_station_rows(observed)={int(min_station_rows)}: "
+                f"{before} -> {len(stations)} stations"
             )
 
     # 5) Neighbor map
@@ -523,14 +620,14 @@ def evaluate_stations(
     for sid in iterator:
         t0 = pd.Timestamp.utcnow().timestamp()
 
-        # --- Target station valid slice -------------------------------------
+        # --- Target station valid rows (candidates for test and/or leakage) ---
         is_target = (df[id_col] == sid)
-        target_valid = df.loc[is_target & valid_mask_global]
+        target_valid = df.loc[is_target & valid_mask_global].copy()
 
         if target_valid.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
-                "station": sid, "n_rows": 0, "seconds": float(sec),
+                "station": sid, "n_rows": 0, "seconds": sec,
                 "rows_train": 0, "rows_test": 0,
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
@@ -545,12 +642,11 @@ def evaluate_stations(
             pending_rows.append(row)
             if log_csv and len(pending_rows) >= flush_every:
                 _append_rows_to_csv(pending_rows, log_csv, header_written_flag=header_flag)
-                pending_rows = []
             if show_progress:
-                tqdm.write(f"{sid}: 0 valid rows for test (skipped)")
+                tqdm.write(f"Station {sid}: 0 valid test rows (skipped)")
             continue
 
-        # --- Train pool (neighbors or all-others; EXCLUDE target) -----------
+        # --- Training pool: neighbors or all-other stations -------------------
         if nmap is not None:
             neigh_ids = nmap.get(sid, [])
             train_pool_mask = df[id_col].isin(neigh_ids) & (~is_target)
@@ -558,33 +654,78 @@ def evaluate_stations(
             train_pool_mask = ~is_target
         train_pool = df.loc[train_pool_mask & valid_mask_global]
 
-        # --- Leakage-controlled inclusion -----------------------------------
+        # --- Stratified inclusion from target station -------------------------
         pct = max(0.0, min(float(include_target_pct), 95.0))
-        n_all_valid = len(target_valid)
-        if pct > 0.0 and n_all_valid > 0:
-            n_take = int(np.floor(n_all_valid * (pct / 100.0)))
-            # Keep at least one row for test if possible
-            if n_all_valid > 1:
-                n_take = min(n_take, n_all_valid - 1)
-        else:
-            n_take = 0
+        n_total = len(target_valid)
 
-        if n_take > 0:
-            inc_idx = target_valid.sample(n=n_take, random_state=int(include_target_seed)).index
-            test_df = target_valid.drop(index=inc_idx)
-            inc_target_df = target_valid.loc[inc_idx]
-        else:
+        if pct <= 0.0 or n_total <= 1:
+            # Pure LOSO-like: no leakage from target
+            inc_target_df = target_valid.iloc[0:0]  # empty with same schema
             test_df = target_valid
-            inc_target_df = target_valid.iloc[0:0]
+        else:
+            # Desired number of target rows to add to training
+            n_take = int(np.ceil(n_total * (pct / 100.0)))
+            # Ensure at least one row remains for testing
+            n_take = min(n_take, n_total - 1)
 
-        # Final train = pool + included-target slice
+            # Month × dry/wet strata: dry = target == 0, wet = target > 0
+            target_valid["_month_"] = target_valid["month"].to_numpy()
+            target_valid["_wet_"] = (target_valid[target_col].to_numpy() > 0.0)
+
+            # Group indices by (month, wet)
+            strata_groups: Dict[Tuple[int, bool], np.ndarray] = {}
+            for key, sub in target_valid.groupby(["_month_", "_wet_"]):
+                strata_groups[key] = sub.index.to_numpy()
+
+            # Allocate samples per stratum proportionally to its size
+            inc_indices: List[int] = []
+            rng = np.random.RandomState(int(include_target_seed))
+
+            for key, idx_arr in strata_groups.items():
+                if len(inc_indices) >= n_take:
+                    break
+                n_stratum = idx_arr.size
+                # proportional allocation, at least 1 if stratum is non-empty
+                n_stratum_take = int(round(n_take * (n_stratum / n_total)))
+                n_stratum_take = max(0, min(n_stratum_take, n_stratum))
+                # postpone if we overshoot; we will trim later
+                if n_stratum_take > 0:
+                    chosen = rng.choice(idx_arr, size=n_stratum_take, replace=False)
+                    inc_indices.extend(chosen.tolist())
+
+            # Trim/extend to exactly n_take if needed
+            if len(inc_indices) > n_take:
+                inc_indices = rng.choice(np.array(inc_indices), size=n_take, replace=False).tolist()
+            elif len(inc_indices) < n_take:
+                # Fill the remaining quota from any leftover indices
+                remaining = n_take - len(inc_indices)
+                all_idx = target_valid.index.to_numpy()
+                mask_chosen = np.isin(all_idx, np.array(inc_indices))
+                pool_left = all_idx[~mask_chosen]
+                if pool_left.size > 0:
+                    extra = rng.choice(pool_left, size=min(remaining, pool_left.size), replace=False)
+                    inc_indices.extend(extra.tolist())
+
+            inc_index = pd.Index(sorted(set(inc_indices)))
+            inc_target_df = target_valid.loc[inc_index].drop(columns=["_month_", "_wet_"])
+            test_df = target_valid.drop(index=inc_index).drop(columns=["_month_", "_wet_"])
+
+            # Safety: ensure we still have at least one test row
+            if test_df.empty:
+                # Move one row back from inclusion to test
+                move_idx = inc_index[-1]
+                move_row = target_valid.loc[[move_idx]]
+                inc_target_df = inc_target_df.drop(index=move_idx)
+                test_df = pd.concat([test_df, move_row.drop(columns=["_month_", "_wet_"])], axis=0)
+
+        # Final train = pool (neighbors/others) + included slice of the target
         train_df = pd.concat([train_pool, inc_target_df], axis=0, copy=False)
 
-        if train_df.empty or test_df.empty:
+        if train_df.empty:
             sec = pd.Timestamp.utcnow().timestamp() - t0
             row = {
-                "station": sid, "n_rows": int(len(test_df)), "seconds": float(sec),
-                "rows_train": int(len(train_df)), "rows_test": int(len(test_df)),
+                "station": sid, "n_rows": 0, "seconds": sec,
+                "rows_train": 0, "rows_test": int(len(test_df)),
                 "MAE_d": np.nan, "RMSE_d": np.nan, "R2_d": np.nan,
                 "MAE_m": np.nan, "RMSE_m": np.nan, "R2_m": np.nan,
                 "MAE_y": np.nan, "RMSE_y": np.nan, "R2_y": np.nan,
@@ -598,9 +739,8 @@ def evaluate_stations(
             pending_rows.append(row)
             if log_csv and len(pending_rows) >= flush_every:
                 _append_rows_to_csv(pending_rows, log_csv, header_written_flag=header_flag)
-                pending_rows = []
             if show_progress:
-                tqdm.write(f"{sid}: empty train or test (skipped)")
+                tqdm.write(f"Station {sid}: empty train (skipped)")
             continue
 
         # --- Fit & predict ---------------------------------------------------
@@ -663,7 +803,6 @@ def evaluate_stations(
 
         if log_csv and len(pending_rows) >= flush_every:
             _append_rows_to_csv(pending_rows, log_csv, header_written_flag=header_flag)
-            pending_rows = []
 
         if show_progress:
             tqdm.write(
@@ -678,9 +817,12 @@ def evaluate_stations(
 
     # Final report & predictions
     report = pd.DataFrame(rows_report)
-    preds = pd.concat(all_preds, axis=0, ignore_index=True) if all_preds else pd.DataFrame(
-        columns=[id_col, date_col, "latitude", "longitude", "altitude", "y_obs", "y_mod"]
-    )
+    if all_preds:
+        preds = pd.concat(all_preds, axis=0, ignore_index=True)
+    else:
+        preds = pd.DataFrame(
+            columns=["station", date_col, "latitude", "longitude", "altitude", "y_obs", "y_mod"]
+        )
 
     # Optional save (report only)
     if save_table_path:
@@ -702,4 +844,8 @@ def evaluate_stations(
 __all__ = [
     "RFParams",
     "evaluate_stations",
+    "_require_columns",
+    "_ensure_datetime_naive",
+    "_add_time_features",
+    "_build_neighbor_map_haversine",
 ]
