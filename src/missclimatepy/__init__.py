@@ -9,9 +9,10 @@ spatial coordinates (latitude, longitude, altitude) and calendar features.
 Public API
 ----------
 - MissClimateImputer : High-level imputer class for fitting and imputing gaps.
+- impute_dataset     : Single-variable long-format imputation engine.
 - RFParams           : Dataclass carrying RandomForest hyperparameters.
-- evaluate_stations  : Station-wise evaluation using k-nearest neighbors and
-                       optional controlled inclusion of target data.
+- evaluate_stations  : Station-wise evaluation with KNN spatial pooling and
+                       optional stratified inclusion of target observations.
 - __version__        : Package version string.
 
 Example
@@ -55,7 +56,7 @@ MIT License © 2025 Hugo Antonio Fernández
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# Version (read from installed package metadata; fallback for editable/dev)
+# Version
 # ---------------------------------------------------------------------------
 try:
     from importlib.metadata import version as _pkg_version
@@ -64,14 +65,16 @@ except Exception:
     __version__ = "0.1.0"
 
 # ---------------------------------------------------------------------------
-# Public symbols
+# Public API
 # ---------------------------------------------------------------------------
 from .api import MissClimateImputer
 from .evaluate import RFParams, evaluate_stations
+from .imputate import impute_dataset
 
 __all__ = [
     "MissClimateImputer",
     "RFParams",
     "evaluate_stations",
+    "impute_dataset",
     "__version__",
 ]

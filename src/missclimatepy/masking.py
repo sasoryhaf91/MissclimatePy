@@ -31,7 +31,6 @@ apply_random_mask_by_station: simulate missingness per station at a target rate.
 
 from __future__ import annotations
 
-#from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
@@ -42,10 +41,21 @@ import pandas as pd
 # Helpers
 # ---------------------------------------------------------------------
 def _ensure_datetime_naive(series: pd.Series) -> pd.Series:
-    """Parse datetimes and drop timezone if present (no deprecated dtype checks)."""
+    """
+    Parse datetimes and drop timezone if present (no deprecated dtype checks).
+    """
     s = pd.to_datetime(series, errors="coerce")
-    if isinstance(s.dtype, pd.DatetimeTZDtype):  # no is_datetime64tz_dtype
-        s = s.dt.tz_localize(None)
+    try:
+        from pandas.api.types import DatetimeTZDtype  # type: ignore
+        if isinstance(s.dtype, DatetimeTZDtype):
+            s = s.dt.tz_localize(None)
+    except Exception:
+        # Fallback best-effort
+        try:
+            _ = s.dt
+            s = s.dt.tz_localize(None)
+        except Exception:
+            pass
     return s
 
 
@@ -112,7 +122,6 @@ def percent_missing_between(
         raise ValueError("Empty date window for percent_missing_between.")
 
     # For each station, count distinct observed days within [start, end].
-    # We consider a day "observed" for the station if the target is not NA for that date.
     in_win = (work[date_col] >= window[0]) & (work[date_col] <= window[-1])
     observed = (
         work.loc[in_win & ~work[target_col].isna(), [id_col, date_col]]
@@ -159,11 +168,6 @@ def gap_profile_by_station(
     DataFrame
         [station, n_gaps, mean_gap, max_gap]
         where gaps are lengths (in days) of consecutive missing sequences.
-
-    Notes
-    -----
-    - Uses numpy operations to avoid name collisions like the earlier
-      "cannot insert valid, already exists" error.
     """
     _require_columns(df, [id_col, date_col, target_col])
 
@@ -187,24 +191,15 @@ def gap_profile_by_station(
         # Boolean valid vector aligned to 'full'
         valid = np.fromiter((d in observed_days for d in full.normalize()), dtype=bool, count=len(full))
 
-        # Run-length encoding on 'valid'
-        # Identify change points
         if valid.size == 0:
             out_rows.append({"station": sid, "n_gaps": 0, "mean_gap": 0.0, "max_gap": 0})
             continue
 
+        # Run-length encoding on 'valid'
         changes = np.diff(valid.astype(np.int8), prepend=valid[0])
-        # Build group ids whenever the state changes
         group_ids = np.cumsum(changes != 0)
 
-        # Aggregate lengths per (group_id, state)
-        # We only keep groups where state == False (missing)
-        # Using numpy bincounts per group id:
-        # length per group:
         lengths = np.bincount(group_ids)
-        # state per group (take the first element of each group)
-        # To get state per group, take valid at the first index of each group.
-        # First indices of groups are where group_ids changes:
         first_indices = np.r_[0, np.flatnonzero(group_ids[1:] != group_ids[:-1]) + 1]
         group_state = valid[first_indices]
 
@@ -221,7 +216,11 @@ def gap_profile_by_station(
                 }
             )
 
-    return pd.DataFrame(out_rows)[["station", "n_gaps", "mean_gap", "max_gap"]].sort_values("station").reset_index(drop=True)
+    return (
+        pd.DataFrame(out_rows)[["station", "n_gaps", "mean_gap", "max_gap"]]
+        .sort_values("station")
+        .reset_index(drop=True)
+    )
 
 
 def missing_matrix(
@@ -267,9 +266,13 @@ def missing_matrix(
         win = _daily_date_range(pd.to_datetime(start), pd.to_datetime(end))
         if win.empty:
             raise ValueError("Empty date window for missing_matrix.")
-        # observed indicator per (station, date) in window
         observed = (
-            work.loc[(work[date_col] >= win[0]) & (work[date_col] <= win[-1]) & ~work[target_col].isna(), [id_col, date_col]]
+            work.loc[
+                (work[date_col] >= win[0]) &
+                (work[date_col] <= win[-1]) &
+                ~work[target_col].isna(),
+                [id_col, date_col],
+            ]
             .drop_duplicates()
         )
         observed["val"] = 1
@@ -280,15 +283,11 @@ def missing_matrix(
     else:
         # station-specific span
         work = work.assign(val=(~work[target_col].isna()).astype(np.int8))
-        # For multiple rows per day, aggregate by max (any observed -> 1)
         day = work.copy()
         day[date_col] = day[date_col].dt.normalize()
-        observed = (
-            day.groupby([id_col, date_col])["val"].max().reset_index()
-        )
+        observed = day.groupby([id_col, date_col])["val"].max().reset_index()
         mat = observed.pivot(index=id_col, columns=date_col, values="val").fillna(0)
 
-    # dtype & ordering
     if as_uint8:
         mat = mat.astype("uint8")
 
@@ -296,7 +295,6 @@ def missing_matrix(
         coverage = mat.mean(axis=1)
         mat = mat.loc[coverage.sort_values(ascending=False).index]
 
-    # Friendly station index name
     mat.index.name = "station"
     return mat
 
@@ -313,7 +311,7 @@ def describe_missing(
     """
     One-stop summary of missingness per station combining coverage and gaps.
 
-    If `start` and `end` are provided, coverage is computed over that fixed
+    If ``start`` and ``end`` are provided, coverage is computed over that fixed
     window. Otherwise, coverage uses each station's own min–max span.
 
     Returns
@@ -332,7 +330,6 @@ def describe_missing(
             end=end,
         )
     else:
-        # station-specific span coverage
         _require_columns(df, [id_col, date_col, target_col])
         work = df[[id_col, date_col, target_col]].copy()
         work[date_col] = _ensure_datetime_naive(work[date_col])
@@ -374,10 +371,26 @@ def describe_missing(
 
     gaps = gap_profile_by_station(df, id_col=id_col, date_col=date_col, target_col=target_col)
     out = cov.merge(gaps, on="station", how="left")
-    out[["n_gaps", "mean_gap", "max_gap"]] = out[["n_gaps", "mean_gap", "max_gap"]].fillna({"n_gaps": 0, "mean_gap": 0.0, "max_gap": 0})
-    return out[
-        ["station", "total_days", "observed_days", "missing_days", "coverage", "percent_missing", "n_gaps", "mean_gap", "max_gap"]
-    ].sort_values(["percent_missing", "station"], ascending=[False, True]).reset_index(drop=True)
+    out[["n_gaps", "mean_gap", "max_gap"]] = out[["n_gaps", "mean_gap", "max_gap"]].fillna(
+        {"n_gaps": 0, "mean_gap": 0.0, "max_gap": 0}
+    )
+    return (
+        out[
+            [
+                "station",
+                "total_days",
+                "observed_days",
+                "missing_days",
+                "coverage",
+                "percent_missing",
+                "n_gaps",
+                "mean_gap",
+                "max_gap",
+            ]
+        ]
+        .sort_values(["percent_missing", "station"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
 
 
 def apply_random_mask_by_station(
@@ -405,17 +418,18 @@ def apply_random_mask_by_station(
         Column names.
     percent_to_mask : float
         Percentage in [0,100]. For each station, this fraction of *eligible*
-        rows will be set to NaN in `target_col`.
+        rows will be set to NaN in ``target_col``.
     random_state : int
         Seed for reproducibility (applied per station).
     only_with_observation : bool
-        If True, mask is sampled only among rows currently *observed* (non-NaN).
-        If False, mask can also pick rows that are already missing (no-ops).
+        If True, mask is sampled only among rows currently *observed*
+        (non-NaN). If False, mask can also pick rows that are already missing
+        (no-ops).
 
     Returns
     -------
     DataFrame
-        A copy of the input with masked values applied to `target_col`.
+        A copy of the input with masked values applied to ``target_col``.
     """
     if percent_to_mask < 0 or percent_to_mask > 100:
         raise ValueError("percent_to_mask must be in [0, 100].")
@@ -429,7 +443,7 @@ def apply_random_mask_by_station(
         if only_with_observation:
             eligible = idx[out.loc[idx, target_col].notna().values]
         else:
-            eligible = idx  # may include already-missing rows
+            eligible = idx
 
         if eligible.size == 0:
             continue

@@ -1,4 +1,5 @@
 # src/missclimatepy/features.py
+# SPDX-License-Identifier: MIT
 """
 missclimatepy.features
 ======================
@@ -95,7 +96,7 @@ def add_calendar_features(
     df: pd.DataFrame,
     date_col: str,
     *,
-    add_cyclic: bool = False
+    add_cyclic: bool = False,
 ) -> pd.DataFrame:
     """
     Append calendar and (optionally) cyclic features based on a datetime column.
@@ -214,11 +215,11 @@ def assemble_feature_space(
     work[date_col] = ensure_datetime_naive(work[date_col])
     work = work.dropna(subset=[date_col])
 
-    # 2) Optional clipping
+    # 2) Optional clipping (correct boolean '&', not Python 'and')
     if start is not None or end is not None:
         lo = pd.to_datetime(start) if start is not None else work[date_col].min()
         hi = pd.to_datetime(end) if end is not None else work[date_col].max()
-        work = work[(work[date_col] >= lo) and (work[date_col] <= hi)]  # type: ignore[func-returns-value]
+        work = work[(work[date_col] >= lo) & (work[date_col] <= hi)]
 
     # 3) Calendar features
     work = add_calendar_features(work, date_col=date_col, add_cyclic=add_cyclic)

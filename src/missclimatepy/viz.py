@@ -1,7 +1,7 @@
 # src/missclimatepy/viz.py
 # SPDX-License-Identifier: MIT
 """
-Visualization utilities for MissclimatePy.
+Visualization utilities for MissClimatePy.
 
 This module provides small, composable plotting helpers to explore:
 - Missingness patterns (heatmap-like matrix).
@@ -10,7 +10,7 @@ This module provides small, composable plotting helpers to explore:
 - Station-level time series overlays (observed vs. predicted).
 - Simple spatial scatter of performance by station coordinates.
 - Gap length distributions (requires gap profiles from masking.gap_profile_by_station).
-- Observed vs imputed series visualization (from impute_dataset output).
+- Observed vs imputed series visualization (from imputation output).
 - Imputation coverage per station (share of imputed points).
 
 Design principles
@@ -22,8 +22,10 @@ Design principles
 
 Notes
 -----
-- All functions are robust to empty inputs and will annotate “No data” rather than failing.
-- Colors/rcParams are *not* customized; callers can style externally as desired.
+- All functions are robust to empty inputs and will annotate “No data”
+  rather than failing.
+- Colors/rcParams are *not* customized; callers can style externally
+  as desired.
 """
 
 from __future__ import annotations
@@ -37,12 +39,20 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 
-# ---------------------------------------------------------------------
+# --------------------------------------------------------------------- #
 # Internal helpers
-# ---------------------------------------------------------------------
-def _ensure_ax(ax: Optional[Axes] = None, figsize: Tuple[float, float] = (8.0, 4.0)) -> Tuple[Figure, Axes, bool]:
+# --------------------------------------------------------------------- #
+def _ensure_ax(
+    ax: Optional[Axes] = None,
+    figsize: Tuple[float, float] = (8.0, 4.0),
+) -> Tuple[Figure, Axes, bool]:
     """
-    Create a new Figure/Axes if `ax` is None. Return (fig, ax, created_flag).
+    Create a new Figure/Axes if ``ax`` is None.
+
+    Returns
+    -------
+    (fig, ax, created_flag)
+        created_flag is True if a new Figure/Axes was created, False otherwise.
     """
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -65,17 +75,28 @@ def _no_data(ax: Axes, message: str = "No data") -> Axes:
 def _coerce_datetime(s: pd.Series) -> pd.Series:
     """
     Best-effort datetime coercion without timezones (naive).
+
+    This avoids deprecated timezone dtype checks by relying on the dtype
+    class introduced by pandas for tz-aware datetimes.
     """
     out = pd.to_datetime(s, errors="coerce")
-    # Avoid deprecated is_datetime64tz_dtype; check dtype class instead
-    if isinstance(out.dtype, pd.DatetimeTZDtype):
-        out = out.dt.tz_localize(None)
+    try:
+        from pandas.api.types import DatetimeTZDtype  # type: ignore
+        if isinstance(out.dtype, DatetimeTZDtype):
+            out = out.dt.tz_localize(None)
+    except Exception:
+        # Fallback: if .dt exists and tz_localize works, try to drop tz
+        try:
+            _ = out.dt  # may raise if not datetime-like
+            out = out.dt.tz_localize(None)
+        except Exception:
+            pass
     return out
 
 
-# ---------------------------------------------------------------------
+# --------------------------------------------------------------------- #
 # Public API
-# ---------------------------------------------------------------------
+# --------------------------------------------------------------------- #
 def plot_missing_matrix(
     df: pd.DataFrame,
     *,
@@ -102,21 +123,21 @@ def plot_missing_matrix(
     stations : sequence or None
         Optional subset of station ids to display.
     max_stations : int
-        Maximum number of stations to plot. If more are available, the top stations
-        (by missingness order) are selected.
+        Maximum number of stations to plot. If more are available, the top
+        stations (by missingness order) are selected.
     sort_by_missing : bool
         If True, order stations from most missing to least missing.
     ax : Axes or None
         Axes to draw on. If None, a new Figure/Axes is created.
     figsize : (float, float)
-        Figure size used when `ax` is None.
+        Figure size used when ``ax`` is None.
 
     Returns
     -------
     Axes
         The axes with the matrix image.
     """
-    fig, ax, created = _ensure_ax(ax, figsize)
+    fig, ax, _ = _ensure_ax(ax, figsize)
 
     if df.empty or df[target_col].isna().all():
         return _no_data(ax, "No data (all missing)")
@@ -197,13 +218,13 @@ def plot_metrics_distribution(
     ax : Axes or None
         Axes to draw on. If None, create a new Figure/Axes.
     figsize : (float, float)
-        Figure size used when `ax` is None.
+        Figure size used when ``ax`` is None.
 
     Returns
     -------
     Axes
     """
-    fig, ax, created = _ensure_ax(ax, figsize)
+    fig, ax, _ = _ensure_ax(ax, figsize)
 
     if report.empty:
         return _no_data(ax, "No metrics to plot")
@@ -253,13 +274,13 @@ def plot_parity_scatter(
     ax : Axes or None
         Axes to draw on. If None, create a new Figure/Axes.
     figsize : (float, float)
-        Figure size used when `ax` is None.
+        Figure size used when ``ax`` is None.
 
     Returns
     -------
     Axes
     """
-    fig, ax, created = _ensure_ax(ax, figsize)
+    fig, ax, _ = _ensure_ax(ax, figsize)
 
     if df.empty or y_true_col not in df.columns or y_pred_col not in df.columns:
         return _no_data(ax, "No parity data")
@@ -315,13 +336,13 @@ def plot_time_series_overlay(
     ax : Axes or None
         Axes to draw on. If None, create a new Figure/Axes.
     figsize : (float, float)
-        Figure size used when `ax` is None.
+        Figure size used when ``ax`` is None.
 
     Returns
     -------
     Axes
     """
-    fig, ax, created = _ensure_ax(ax, figsize)
+    fig, ax, _ = _ensure_ax(ax, figsize)
 
     if df.empty:
         return _no_data(ax, "No time series data")
@@ -370,13 +391,13 @@ def plot_spatial_scatter(
     ax : Axes or None
         Axes to draw on. If None, create a new Figure/Axes.
     figsize : (float, float)
-        Figure size used when `ax` is None.
+        Figure size used when ``ax`` is None.
 
     Returns
     -------
     Axes
     """
-    fig, ax, created = _ensure_ax(ax, figsize)
+    fig, ax, _ = _ensure_ax(ax, figsize)
 
     if df.empty or lat_col not in df.columns or lon_col not in df.columns or value_col not in df.columns:
         return _no_data(ax, "No spatial data")
@@ -408,8 +429,8 @@ def plot_gap_histogram(
     Parameters
     ----------
     gap_df : DataFrame
-        Output from `masking.gap_profile_by_station`, which typically includes
-        columns like 'max_gap', 'mean_gap', etc.
+        Output from ``masking.gap_profile_by_station``, which typically includes
+        columns like ``max_gap``, ``mean_gap``, etc.
     gap_len_col : str
         Column name representing gap lengths in days (or periods).
     ax : Axes or None
@@ -417,13 +438,13 @@ def plot_gap_histogram(
     bins : int
         Number of histogram bins.
     figsize : (float, float)
-        Figure size used when `ax` is None.
+        Figure size used when ``ax`` is None.
 
     Returns
     -------
     Axes
     """
-    fig, ax, created = _ensure_ax(ax, figsize)
+    fig, ax, _ = _ensure_ax(ax, figsize)
 
     if gap_df.empty or gap_len_col not in gap_df.columns:
         return _no_data(ax, "No gap data")
@@ -439,37 +460,38 @@ def plot_gap_histogram(
     return ax
 
 
-# ---------------------------------------------------------------------
-# New: Observed vs Imputed series (from imputation output)
-# ---------------------------------------------------------------------
+# --------------------------------------------------------------------- #
+# Observed vs Imputed series (from imputation output)
+# --------------------------------------------------------------------- #
 def plot_imputed_series(
     df: pd.DataFrame,
     *,
-    station: str,
+    station: object,
     id_col: str = "station",
     date_col: str = "date",
     target_col: str = "tmin",
     source_col: str = "source",
-    start: str | None = None,
-    end: str | None = None,
-    title: str | None = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    title: Optional[str] = None,
     figsize: Tuple[float, float] = (11.0, 4.0),
     alpha_line: float = 0.9,
     ms: int = 12,
 ) -> Axes:
     """
     Plot a single station's time series highlighting observed vs imputed points.
-    Intended for the dataframe returned by `impute_dataset(...)`, which must
-    include `source_col` ∈ {"observed","imputed"}.
+
+    Intended for the dataframe returned by an imputation routine that marks
+    each row with ``source_col`` ∈ {"observed","imputed"}.
 
     Parameters
     ----------
     df : DataFrame
-        Output of `impute_dataset(...)` (must include `source_col`).
-    station : str
+        Imputation output (must include ``source_col``).
+    station : object
         Station identifier to plot.
     id_col, date_col, target_col, source_col : str
-        Column names. `source_col` should contain "observed" / "imputed".
+        Column names. ``source_col`` should contain "observed" / "imputed".
     start, end : str or None
         Optional inclusive window to display.
     title : str or None
@@ -485,22 +507,26 @@ def plot_imputed_series(
     -------
     Axes
     """
-    fig, ax, created = _ensure_ax(None, figsize)
+    fig, ax, _ = _ensure_ax(None, figsize)  # always create a fresh figure
 
     if df.empty:
         return _no_data(ax, "Empty dataframe: nothing to plot.")
 
-    if date_col not in df.columns:
-        return _no_data(ax, f"Column '{date_col}' not found.")
+    if date_col not in df.columns or id_col not in df.columns or target_col not in df.columns:
+        return _no_data(ax, "Missing required columns for time series plot.")
+
+    if source_col not in df.columns:
+        return _no_data(ax, f"Column '{source_col}' not found (expected observed/imputed labels).")
 
     # Filter single station and optional window
     sub = df[df[id_col] == station].copy()
     if sub.empty:
         return _no_data(ax, f"No rows for station '{station}'.")
+
     sub[date_col] = _coerce_datetime(sub[date_col])
-    if start or end:
-        lo = pd.to_datetime(start) if start else sub[date_col].min()
-        hi = pd.to_datetime(end) if end else sub[date_col].max()
+    if start is not None or end is not None:
+        lo = pd.to_datetime(start) if start is not None else sub[date_col].min()
+        hi = pd.to_datetime(end) if end is not None else sub[date_col].max()
         sub = sub[(sub[date_col] >= lo) & (sub[date_col] <= hi)].copy()
         if sub.empty:
             return _no_data(ax, "No data in the requested window.")
@@ -519,7 +545,6 @@ def plot_imputed_series(
     if not imp.empty:
         ax.scatter(imp[date_col], imp[target_col], marker="x", s=ms, label="Imputed", zorder=3)
 
-    # Cosmetics
     ax.set_xlabel("Date")
     ax.set_ylabel(target_col)
     ax.grid(True, alpha=0.25)
@@ -543,9 +568,9 @@ def plot_imputation_coverage(
     Parameters
     ----------
     df : DataFrame
-        Output of `impute_dataset(...)`.
+        Imputation output.
     id_col, source_col : str
-        Column names; `source_col` ∈ {"observed","imputed"}.
+        Column names; ``source_col`` ∈ {"observed","imputed"}.
     sort_by : {"imputed_ratio","observed_ratio","station"}
         Sort criterion for bars.
     figsize : (float, float)
@@ -555,7 +580,7 @@ def plot_imputation_coverage(
     -------
     Axes
     """
-    fig, ax, created = _ensure_ax(None, figsize)
+    fig, ax, _ = _ensure_ax(None, figsize)  # always create a fresh figure
 
     if df.empty:
         return _no_data(ax, "Empty dataframe.")
@@ -564,10 +589,11 @@ def plot_imputation_coverage(
         return _no_data(ax, "Missing required columns for coverage plot.")
 
     # Ratios per station
-    tab = (df
-           .assign(is_imp=(df[source_col] == "imputed").astype(int))
-           .groupby(id_col)["is_imp"]
-           .agg(imputed="sum", total="count"))
+    tab = (
+        df.assign(is_imp=(df[source_col] == "imputed").astype(int))
+        .groupby(id_col)["is_imp"]
+        .agg(imputed="sum", total="count")
+    )
     if tab.empty:
         return _no_data(ax, "No grouped data for coverage.")
 
@@ -588,11 +614,13 @@ def plot_imputation_coverage(
     ax.set_ylim(0, 1)
     ax.grid(axis="y", alpha=0.3)
     ax.set_title("Imputation coverage per station")
+
     # Reduce x label clutter for many stations
     if len(tab) > 20:
         for label in ax.get_xticklabels():
             label.set_rotation(90)
             label.set_ha("center")
+
     return ax
 
 
