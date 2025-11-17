@@ -1,8 +1,8 @@
-# src/missclimatepy/imputate.py
+# src/missclimatepy/impute.py
 # SPDX-License-Identifier: MIT
 """
-missclimatepy.imputate
-======================
+missclimatepy.impute
+====================
 
 Minimal long-format imputation for a *single target* variable using ONLY:
 - Spatial coordinates: latitude, longitude, altitude
@@ -10,24 +10,40 @@ Minimal long-format imputation for a *single target* variable using ONLY:
 
 For each *selected* station, a **RandomForestRegressor** is trained with:
 1) Either the K nearest spatial neighbors (haversine over (lat, lon)) or
-   *all other* stations if `k_neighbors=None`, and
-2) **Full inclusion of the target station's valid rows** (no percentage control).
+   *all other* stations if ``k_neighbors=None``, and
+2) A controllable fraction of the target station's own valid rows
+   (via ``include_target_pct``), from 0% (LOSO) to 100%.
 
-Key policy: MDR by *observed target rows*
------------------------------------------
-A station is *eligible for imputation* only if its **count of observed (non-NaN)
-target rows within [start, end]** is ≥ ``max(1826, min_station_rows or 0)``.
-Stations below this threshold are returned as:
-- full daily grid in the window,
-- observed values preserved,
-- remaining gaps left as NaN,
-- ``source`` set to ``"observed"`` where present and NaN otherwise,
-i.e., **no imputation** is performed.
+Station eligibility (min_station_rows)
+--------------------------------------
+A station is imputed only if the number of **observed (non-NaN) target rows**
+within [start, end] is ≥ ``min_station_rows`` when this parameter is provided
+and > 0. If ``min_station_rows`` is ``None`` or 0, *no minimum* is enforced
+(all selected stations are eligible).
+
+Information visibility (include_target_pct)
+-------------------------------------------
+For each eligible station, the fraction of its own observed rows that is used
+in the training set is controlled by ``include_target_pct``:
+
+- ``include_target_pct is None or >= 100``:
+    All observed rows of the station are included in the training set
+    (original behavior).
+- ``0 <= include_target_pct < 100``:
+    Only that percentage (floored) of the station's observed rows is included
+    in the training set. Rows are selected deterministically in chronological
+    order (oldest to newest). Remaining observed rows are kept in the output as
+    ``source="observed"`` but are *not* seen by the model during training.
+- ``include_target_pct == 0``:
+    Extreme LOSO scenario where the model never sees the target station's
+    history and relies only on neighbors (when available).
 
 Output (minimal tidy)
 ---------------------
 Exactly these columns, in order:
-``[station, date, latitude, longitude, altitude, <target>, source]``
+
+    [station, date, latitude, longitude, altitude, <target>, source]
+
 with ``source ∈ {"observed", "imputed"}``.
 
 Persistence
@@ -39,7 +55,7 @@ Use the parameters ``save_path``, ``save_format``, ``save_index`` and
 
 Example
 -------
->>> from missclimatepy.imputate import impute_dataset
+>>> from missclimatepy.impute import impute_dataset
 >>> from missclimatepy.evaluate import RFParams
 >>> out = impute_dataset(
 ...     data=df,
@@ -49,21 +65,21 @@ Example
 ...     start="1981-01-01", end="2023-12-31",
 ...     k_neighbors=20,
 ...     rf_params=RFParams(n_estimators=300, max_depth=30, n_jobs=-1, random_state=42),
-...     min_station_rows=None,   # MDR uses 1826 by default
+...     min_station_rows=365,
+...     include_target_pct=50.0,
 ...     show_progress=True,
-...     save_path="outputs/tmin_imputed.parquet",  # autosave
-...     save_format="auto",                        # infer from extension
-...     save_partitions=False,                     # single file
+...     save_path="outputs/tmin_imputed.parquet",
+...     save_format="auto",
+...     save_partitions=False,
 ... )
 >>> out.columns.tolist()
-['station','date','latitude','longitude','altitude','tmin','source']
+['station', 'date', 'latitude', 'longitude', 'altitude', 'tmin', 'source']
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union, Literal
-
 from pathlib import Path
 
 import numpy as np
@@ -86,6 +102,7 @@ except Exception:  # pragma: no cover
 
 
 # ------------------------- internal: persistence helpers ------------------------- #
+
 
 def _infer_format_from_path(path: str) -> Literal["csv", "parquet"]:
     """
@@ -237,6 +254,7 @@ def _save_result_df(
 
 # ------------------------------ public imputation API ------------------------------ #
 
+
 def impute_dataset(
     data: pd.DataFrame,
     *,
@@ -263,6 +281,8 @@ def impute_dataset(
     neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]] = None,
     # MDR (minimum observed rows within the window)
     min_station_rows: Optional[int] = None,
+    # how much of the target station history the model can see
+    include_target_pct: Optional[float] = None,
     # model
     rf_params: Optional[Union[RFParams, Dict]] = None,
     # logging
@@ -277,11 +297,28 @@ def impute_dataset(
     Impute the target time series for *selected* stations over [start, end]
     and return a minimal long-format DataFrame. Optionally save the result.
 
-    MDR (eligibility)
-    -----------------
+    Station eligibility (min_station_rows)
+    --------------------------------------
     A station is imputed only if the number of **observed (non-NaN) target rows**
-    within [start, end] is ≥ ``max(1826, min_station_rows or 0)``. Otherwise,
-    the station is returned observed-only (no imputation), preserving gaps.
+    within [start, end] is ≥ ``min_station_rows`` when this parameter is
+    provided and > 0. If ``min_station_rows`` is ``None`` or 0, *no minimum*
+    is enforced (all selected stations are eligible).
+
+    Information visibility (include_target_pct)
+    -------------------------------------------
+    For each eligible station, the fraction of its own observed rows that is
+    used in the training set is controlled by ``include_target_pct``:
+
+    - ``include_target_pct is None or >= 100``:
+        All observed rows of the station are included in the training set
+        (original behavior).
+    - ``0 <= include_target_pct < 100``:
+        Only that percentage (floored) of the station's observed rows is
+        included in the training set. Rows are selected deterministically in
+        chronological order (oldest to newest).
+    - ``include_target_pct == 0``:
+        No local rows are used in training (extreme LOSO); imputation is
+        driven solely by neighboring stations when available.
 
     Parameters
     ----------
@@ -307,9 +344,12 @@ def impute_dataset(
     neighbor_map : dict or None
         Overrides `k_neighbors`. Dict {station_id -> list_of_neighbor_ids}.
     min_station_rows : int or None
-        Optional stricter MDR. Actual threshold is:
-        ``MDR_MIN = max(1826, min_station_rows or 0)``.
-        MDR counts **observed target rows** within [start, end].
+        Minimum number of observed target rows within the window required for
+        a station to be imputed. If None or 0, no minimum is enforced.
+    include_target_pct : float in [0, 100] or None
+        Fraction of each station's *observed* target rows allowed into the
+        training set. Values ≥ 100 are treated as full inclusion.
+
     rf_params : RFParams | dict | None
         RandomForest hyperparameters. Missing fields use defaults.
     show_progress : bool
@@ -334,14 +374,7 @@ def impute_dataset(
     DataFrame
         Minimal long-format table with **exactly** the columns:
         [station, date, latitude, longitude, altitude, <target_col>, source]
-        where `source` ∈ {"observed", "imputed"} for processed stations.
-
-    Notes
-    -----
-    - Only the target variable is modeled and returned.
-    - Coordinates in the output are station-level medoids (median per station).
-    - Determinism depends on `rf_params.random_state`.
-    - Saving is best-effort and raises a clear ValueError on unsupported formats.
+        where ``source ∈ {"observed", "imputed"}``.
     """
     # ---- basic validation & windowing ---------------------------------------
     _require_columns(data, [id_col, date_col, lat_col, lon_col, alt_col, target_col])
@@ -394,27 +427,23 @@ def impute_dataset(
     seen = set()
     stations = [s for s in chosen if not (s in seen or seen.add(s))]
 
-    # ---- MDR filter (by *observed* target rows in window) --------------------
-    base_mdr = 1826
-    user_mdr = int(min_station_rows) if (min_station_rows is not None) else 0
-    MDR_MIN = max(base_mdr, user_mdr)
-
-    observed_mask = ~df[target_col].isna()
-    obs_counts = (
-        df.loc[observed_mask]
-        .groupby(id_col, sort=False)[target_col]
-        .size()
-        .astype(int)
-    )
-
-    eligible = [s for s in stations if int(obs_counts.get(s, 0)) >= MDR_MIN]
-    if show_progress and len(eligible) != len(stations):
-        skipped = [s for s in stations if s not in eligible]
-        tqdm.write(
-            f"MDR (observed≥{MDR_MIN}) filter: {len(stations)} → {len(eligible)} stations "
-            f"(skipped {len(skipped)})"
+    # ---- MDR filter (by *observed* target rows in window, user-controlled) ---
+    if min_station_rows is not None and min_station_rows > 0:
+        observed_mask = ~df[target_col].isna()
+        obs_counts = (
+            df.loc[observed_mask]
+            .groupby(id_col, sort=False)[target_col]
+            .size()
+            .astype(int)
         )
-    stations = eligible
+        eligible = [s for s in stations if int(obs_counts.get(s, 0)) >= int(min_station_rows)]
+        if show_progress and len(eligible) != len(stations):
+            skipped = [s for s in stations if s not in eligible]
+            tqdm.write(
+                f"MDR filter (observed≥{min_station_rows}): "
+                f"{len(stations)} → {len(eligible)} stations (skipped {len(skipped)})"
+            )
+        stations = eligible
 
     if not stations:
         empty = pd.DataFrame(
@@ -436,7 +465,12 @@ def impute_dataset(
         nmap = neighbor_map
     elif k_neighbors is not None:
         nmap = _build_neighbor_map_haversine(
-            df, id_col=id_col, lat_col=lat_col, lon_col=lon_col, k=int(k_neighbors), include_self=False
+            df,
+            id_col=id_col,
+            lat_col=lat_col,
+            lon_col=lon_col,
+            k=int(k_neighbors),
+            include_self=False,
         )
     else:
         nmap = None
@@ -472,13 +506,15 @@ def impute_dataset(
         lon0 = float(medoids.loc[sid, "longitude"]) if sid in medoids.index else np.nan
         alt0 = float(medoids.loc[sid, "altitude"]) if sid in medoids.index else np.nan
 
-        grid = pd.DataFrame({
-            date_col: full_dates,
-            id_col: sid,
-            "latitude": lat0,
-            "longitude": lon0,
-            "altitude": alt0,
-        })
+        grid = pd.DataFrame(
+            {
+                date_col: full_dates,
+                id_col: sid,
+                "latitude": lat0,
+                "longitude": lon0,
+                "altitude": alt0,
+            }
+        )
 
         # Attach observed target (restricted to window)
         st_obs = df.loc[df[id_col] == sid, [date_col, target_col]]
@@ -488,7 +524,7 @@ def impute_dataset(
         merged = _add_time_features(merged, date_col, add_cyclic=add_cyclic)
 
         # Build training pool: neighbors or all-other stations (exclude target)
-        is_target_mask = (df[id_col] == sid)
+        is_target_mask = df[id_col] == sid
         if nmap is not None:
             neigh_ids = nmap.get(sid, [])
             pool_mask = df[id_col].isin(neigh_ids) & (~is_target_mask) & valid_mask_global
@@ -497,22 +533,65 @@ def impute_dataset(
 
         train_pool = df.loc[pool_mask, feats + [target_col]]
 
-        # FULL inclusion of the target station's valid rows (no percentage control)
-        st_valid = df.loc[is_target_mask & valid_mask_global, feats + [target_col]]
-        train_df = pd.concat([train_pool, st_valid], axis=0, ignore_index=True)
+        # Fallback: si no hay vecinos válidos, usar todas las demás estaciones
+        # con valores observados del target dentro de la ventana.
+        if train_pool.empty:
+            alt_pool_mask = (~is_target_mask) & (~df[target_col].isna()) & valid_mask_global
+            train_pool = df.loc[alt_pool_mask, feats + [target_col]]
+
+        # Target-station valid rows (features + target present + date para ordenar)
+        st_valid = df.loc[
+            is_target_mask & valid_mask_global,
+            [date_col] + feats + [target_col],
+        ]
+
+        # -------- include_target_pct control (deterministic, by date) ---------
+        if include_target_pct is not None:
+            if include_target_pct < 0:
+                raise ValueError("include_target_pct must be >= 0 or None.")
+            if include_target_pct >= 100.0:
+                # full inclusion (original behavior)
+                pass
+            else:
+                n_local = len(st_valid)
+                if n_local > 0:
+                    st_valid = st_valid.sort_values(date_col)
+                    k_sel = int(np.floor(n_local * (include_target_pct / 100.0)))
+                    if k_sel > 0:
+                        st_valid = st_valid.iloc[:k_sel, :]
+                    else:
+                        # k_sel == 0 → no local rows used in training (extreme LOSO)
+                        st_valid = st_valid.iloc[0:0, :]
+
+        # Drop date_col: the model only sees features + target
+        if not st_valid.empty:
+            st_valid_for_train = st_valid[feats + [target_col]]
+        else:
+            st_valid_for_train = st_valid  # empty DataFrame
+
+        # Concatenate training pool + selected target-station rows
+        train_df = pd.concat([train_pool, st_valid_for_train], axis=0, ignore_index=True)
 
         if train_df.empty:
-            # Guard: return observed-only rows as minimal block
+            # Guard: no training information at all → return observed-only rows
             y_obs = merged[target_col].to_numpy()
-            out = pd.DataFrame({
-                id_col: sid,
-                "date": merged[date_col].to_numpy(),
-                "latitude": merged["latitude"].astype(float).to_numpy(),
-                "longitude": merged["longitude"].astype(float).to_numpy(),
-                "altitude": merged["altitude"].astype(float).to_numpy(),
-                target_col: y_obs,
-                "source": np.where(np.isnan(y_obs), np.nan, "observed").astype("object"),
-            })
+            mask_nan = np.isnan(y_obs)
+
+            source = np.empty(len(y_obs), dtype="object")
+            source[mask_nan] = np.nan
+            source[~mask_nan] = "observed"
+
+            out = pd.DataFrame(
+                {
+                    id_col: sid,
+                    "date": merged[date_col].to_numpy(),
+                    "latitude": merged["latitude"].astype(float).to_numpy(),
+                    "longitude": merged["longitude"].astype(float).to_numpy(),
+                    "altitude": merged["altitude"].astype(float).to_numpy(),
+                    target_col: y_obs,
+                    "source": source,
+                }
+            )
             out_blocks.append(out)
             if show_progress:
                 tqdm.write(f"Station {sid}: empty training set → observed-only.")
@@ -533,16 +612,28 @@ def impute_dataset(
         filled = y_obs.copy()
         filled[mask_nan] = y_hat[mask_nan]
 
+        # Build 'source' as object array:
+        if merged[target_col].isna().all():
+            # Caso LOSO puro: la estación no tiene ningún valor observado,
+            # por lo que todas las filas son imputadas.
+            source = np.full(len(merged), "imputed", dtype="object")
+        else:
+            source = np.empty(len(y_obs), dtype="object")
+            source[mask_nan] = "imputed"
+            source[~mask_nan] = "observed"
+
         # Minimal long-format block
-        out = pd.DataFrame({
-            id_col: sid,
-            "date": merged[date_col].to_numpy(),
-            "latitude": merged["latitude"].astype(float).to_numpy(),
-            "longitude": merged["longitude"].astype(float).to_numpy(),
-            "altitude": merged["altitude"].astype(float).to_numpy(),
-            target_col: filled,
-            "source": np.where(mask_nan, "imputed", "observed").astype("object"),
-        })
+        out = pd.DataFrame(
+            {
+                id_col: sid,
+                "date": merged[date_col].to_numpy(),
+                "latitude": merged["latitude"].astype(float).to_numpy(),
+                "longitude": merged["longitude"].astype(float).to_numpy(),
+                "altitude": merged["altitude"].astype(float).to_numpy(),
+                target_col: filled,
+                "source": source,
+            }
+        )
         out_blocks.append(out)
 
         if show_progress:
@@ -550,8 +641,9 @@ def impute_dataset(
             n_imp = int((out["source"] == "imputed").sum())
             k_text = len(nmap.get(sid, [])) if nmap is not None else "all"
             tqdm.write(
-                f"Station {sid}: window={len(out):,}  observed={n_obs:,}  imputed={n_imp:,}  "
-                f"k={k_text}"
+                f"Station {sid}: window={len(out):,}  observed={n_obs:,}  "
+                f"imputed={n_imp:,}  k={k_text}, "
+                f"include_target_pct={include_target_pct if include_target_pct is not None else 100}"
             )
 
     # Stack, sort, return *minimal* schema only

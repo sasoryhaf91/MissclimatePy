@@ -69,7 +69,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 from .api import MissClimateImputer
 from .evaluate import RFParams, evaluate_stations
-from .imputate import impute_dataset
+from .impute import impute_dataset
 
 __all__ = [
     "MissClimateImputer",
