@@ -1,345 +1,325 @@
-# src/missclimatepy/neighbors.py
 # SPDX-License-Identifier: MIT
 """
 missclimatepy.neighbors
 =======================
 
-Spatial neighbor search utilities for MissClimatePy.
+Spatial neighbor utilities for MissClimatePy.
 
-This module exposes composable helpers to find nearest stations using
-great-circle distances (Haversine) on latitude/longitude, with optional
-filters on maximum horizontal radius and maximum altitude difference.
+This module provides small, focused helpers to work with station
+coordinates on the sphere (lat/lon in degrees) and to build
+neighbor structures based on great-circle distances:
 
-Key functions
--------------
-- neighbor_distances : Return a tidy DataFrame with k nearest neighbors
-  per station.
-- build_neighbor_map : Return a dict {station_id: [neighbor_ids...]} for
-  fast lookup in modeling workflows.
+- :func:`haversine_distance`:
+    Vectorized great-circle distance (km) between two points.
+- :func:`compute_station_centroids`:
+    Reduce a long table to one row per station, with mean latitude/longitude.
+- :func:`neighbor_distances`:
+    Compute K-nearest neighbor pairs (from_id, to_id, distance_km)
+    using a haversine BallTree.
+- :func:`build_neighbor_map`:
+    Convenience wrapper returning a dict {station_id -> [neighbor_ids]}.
 
-Design notes
-------------
-- Haversine distances require radians; conversion is handled internally.
-- Distances are returned in kilometers using the IUGG mean Earth radius.
-- Self matches are removed by default.
-- Optional altitude filtering allows restricting neighbors by |Δ altitude|.
-- Deterministic, order-stable results for reproducibility.
+All functions assume coordinates in **decimal degrees** and distances
+are returned in **kilometers**.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Union
 
 import numpy as np
 import pandas as pd
+from sklearn.neighbors import BallTree
 
-try:
-    from sklearn.neighbors import BallTree
-    _HAS_SK_BALLTREE = True
-except Exception:  # pragma: no cover
-    BallTree = None  # type: ignore[assignment]
-    _HAS_SK_BALLTREE = False
+EARTH_RADIUS_KM = 6371.0
 
 
-# Mean Earth radius in kilometers (IUGG recommended value)
-EARTH_RADIUS_KM: float = 6371.0088
+# ---------------------------------------------------------------------------
+# Basic haversine distance
+# ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------#
-# Internal helpers
-# ---------------------------------------------------------------------#
-def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
+def haversine_distance(
+    lat1: np.ndarray,
+    lon1: np.ndarray,
+    lat2: np.ndarray,
+    lon2: np.ndarray,
+) -> np.ndarray:
     """
-    Raise a ValueError if any of the requested columns is missing.
-    """
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}. Available: {list(df.columns)[:10]}...")
-
-
-def _latlon_to_radians(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
-    """
-    Stack (lat, lon) columns and convert to radians for BallTree(haversine).
+    Compute great-circle distance between two sets of points (km).
 
     Parameters
     ----------
-    lat, lon : np.ndarray
-        Latitude and longitude in degrees.
+    lat1, lon1 : array-like
+        Latitudes/longitudes of the first set of points in degrees.
+    lat2, lon2 : array-like
+        Latitudes/longitudes of the second set of points in degrees.
 
     Returns
     -------
     np.ndarray
-        Two-column array [[lat_rad, lon_rad], ...] in radians.
+        Distances in kilometers, with the usual broadcasting semantics.
     """
-    return np.deg2rad(np.c_[lat, lon])
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = np.radians(lat2)
+    lon2_rad = np.radians(lon2)
+
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
+    )
+    c = 2.0 * np.arcsin(np.sqrt(a))
+
+    return EARTH_RADIUS_KM * c
 
 
-# ---------------------------------------------------------------------#
-# Public API
-# ---------------------------------------------------------------------#
-def neighbor_distances(
-    df: pd.DataFrame,
+# ---------------------------------------------------------------------------
+# Station centroids
+# ---------------------------------------------------------------------------
+
+
+def compute_station_centroids(
+    data: pd.DataFrame,
     *,
     id_col: str,
     lat_col: str,
     lon_col: str,
-    altitude_col: Optional[str] = None,
-    k_neighbors: int = 5,
-    max_radius_km: Optional[float] = None,
-    max_abs_altitude_diff: Optional[float] = None,
-    include_self: bool = False,
 ) -> pd.DataFrame:
     """
-    Compute k nearest neighbor stations for each station using Haversine distance.
+    Compute a single lat/lon centroid per station.
 
     Parameters
     ----------
-    df : DataFrame
-        Station metadata with columns for id, latitude, longitude, and
-        optionally altitude. Each row must correspond to a single station.
-    id_col, lat_col, lon_col : str
-        Column names for station id and geographic coordinates (in degrees).
-    altitude_col : str or None
-        Optional altitude column name (in meters). If provided together with
-        `max_abs_altitude_diff`, neighbors whose absolute altitude difference
-        exceeds the threshold will be excluded.
-    k_neighbors : int
-        Number of neighbors to return per station. If `include_self=False`
-        (default), the function internally queries k+1 (capped by the number
-        of available stations) and drops self-matches to guarantee up to k
-        neighbors when possible.
-    max_radius_km : float or None
-        Optional maximum great-circle distance (km) for neighbors. Candidates
-        outside this radius are discarded.
-    max_abs_altitude_diff : float or None
-        Optional maximum absolute altitude difference (same units as altitude
-        column, typically meters). Candidates exceeding the threshold are
-        discarded.
-    include_self : bool
-        If True, a station may appear as its own neighbor at distance 0.
-        By default, self is removed.
+    data : pandas.DataFrame
+        Long-format table with at least the station id and coordinate columns.
+    id_col : str
+        Name of the station id column.
+    lat_col : str
+        Name of the latitude column (degrees).
+    lon_col : str
+        Name of the longitude column (degrees).
 
     Returns
     -------
-    DataFrame
-        Tidy table with columns:
-        - station       : station id (source)
-        - neighbor      : neighbor station id (target)
-        - distance_km   : great-circle distance in kilometers
-        - rank          : 1..k rank by ascending distance (ties broken by id)
-        - altitude_diff : neighbor_altitude - station_altitude (if available)
-
-        Rows with no available neighbors after filtering are omitted.
-
-    Notes
-    -----
-    - Distances are computed with sklearn BallTree(haversine), which expects
-      coordinates in radians and returns angular distance in radians. We convert
-      to kilometers via multiplication by EARTH_RADIUS_KM.
-    - The function preserves determinism by breaking equal-distance ties with
-      neighbor id ordering.
+    pandas.DataFrame
+        DataFrame with columns [id_col, lat_col, lon_col] and one row per
+        unique station id. Lat/lon are simple arithmetic means.
     """
-    if not _HAS_SK_BALLTREE:
-        raise ImportError(
-            "scikit-learn BallTree is required for neighbor_distances. "
-            "Install scikit-learn or avoid using spatial neighbors."
-        )
+    if data.empty:
+        return pd.DataFrame(columns=[id_col, lat_col, lon_col])
 
-    _require_columns(df, [id_col, lat_col, lon_col])
-    if k_neighbors <= 0:
-        raise ValueError("k_neighbors must be a positive integer.")
-
-    # Prepare metadata table
-    base_cols = [id_col, lat_col, lon_col]
-    if altitude_col is not None and altitude_col in df.columns:
-        base_cols.append(altitude_col)
-
-    meta = df[base_cols].copy()
-
-    station_ids = meta[id_col].astype(object).to_numpy()
-    lat = pd.to_numeric(meta[lat_col], errors="coerce").to_numpy()
-    lon = pd.to_numeric(meta[lon_col], errors="coerce").to_numpy()
-
-    # Drop rows with invalid coordinates
-    valid_mask = (~np.isnan(lat)) & (~np.isnan(lon))
-    if not np.all(valid_mask):
-        meta = meta.loc[valid_mask].reset_index(drop=True)
-        station_ids = station_ids[valid_mask]
-        lat = lat[valid_mask]
-        lon = lon[valid_mask]
-
-    n_stations = len(station_ids)
-    if n_stations == 0:
-        return pd.DataFrame(columns=["station", "neighbor", "distance_km", "rank"])
-
-    coords_rad = _latlon_to_radians(lat, lon)
-    tree = BallTree(coords_rad, metric="haversine")
-
-    # If excluding self, query k+1 but never more than n_stations
-    if include_self:
-        query_k = min(k_neighbors, n_stations)
-    else:
-        query_k = min(k_neighbors + 1, n_stations)
-
-    distances_rad, indices = tree.query(coords_rad, k=query_k)
-    distances_km = distances_rad * EARTH_RADIUS_KM
-
-    # Optional altitude vector
-    alt = None
-    if altitude_col is not None and altitude_col in meta.columns:
-        alt = pd.to_numeric(meta[altitude_col], errors="coerce").to_numpy()
-
-    rows: List[Dict] = []
-
-    for i in range(n_stations):
-        sid = station_ids[i]
-        cand_idx = indices[i]
-        cand_ids = station_ids[cand_idx]
-        cand_dist = distances_km[i]
-
-        # Start with all candidates
-        keep = np.ones_like(cand_dist, dtype=bool)
-
-        # Optionally remove self
-        if not include_self:
-            keep &= cand_ids != sid
-
-        # Apply maximum radius
-        if max_radius_km is not None:
-            keep &= cand_dist <= max_radius_km
-
-        # Apply altitude difference filter if applicable
-        if alt is not None and max_abs_altitude_diff is not None:
-            delta_alt = alt[cand_idx] - alt[i]  # neighbor_alt - station_alt
-            keep &= np.abs(delta_alt) <= max_abs_altitude_diff
-        else:
-            delta_alt = None  # type: ignore[assignment]
-
-        if not np.any(keep):
-            # No neighbors for this station under filters
-            continue
-
-        kept_ids = cand_ids[keep]
-        kept_dist = cand_dist[keep]
-        kept_delta = delta_alt[keep] if delta_alt is not None else None
-
-        # Sort by (distance, neighbor id) for determinism
-        order = np.lexsort((kept_ids, kept_dist))
-        kept_ids = kept_ids[order]
-        kept_dist = kept_dist[order]
-        if kept_delta is not None:
-            kept_delta = kept_delta[order]
-
-        # Cap to k_neighbors
-        cap = min(k_neighbors, kept_ids.size)
-        for rank, (nid, dkm) in enumerate(zip(kept_ids[:cap], kept_dist[:cap]), start=1):
-            record = {
-                "station": sid,
-                "neighbor": nid,
-                "distance_km": float(dkm),
-                "rank": int(rank),
-            }
-            if kept_delta is not None:
-                record["altitude_diff"] = float(kept_delta[rank - 1])
-            rows.append(record)
-
-    if not rows:
-        # No neighbors found under filters
-        cols = ["station", "neighbor", "distance_km", "rank"]
-        if altitude_col is not None:
-            cols.append("altitude_diff")
-        return pd.DataFrame(columns=cols)
-
-    out = pd.DataFrame(rows)
-
-    # Enforce column order and dtypes
-    columns = ["station", "neighbor", "distance_km", "rank"]
-    if "altitude_diff" in out.columns:
-        columns.append("altitude_diff")
-
-    out = out[columns].sort_values(["station", "rank", "neighbor"]).reset_index(drop=True)
-    out["rank"] = out["rank"].astype(int)
-    out["distance_km"] = out["distance_km"].astype(float)
-    if "altitude_diff" in out.columns:
-        out["altitude_diff"] = out["altitude_diff"].astype(float)
-
-    return out
+    centroids = (
+        data[[id_col, lat_col, lon_col]]
+        .groupby(id_col, as_index=False)
+        .mean(numeric_only=True)
+    )
+    return centroids
 
 
-def build_neighbor_map(
-    df: pd.DataFrame,
+# ---------------------------------------------------------------------------
+# Neighbor distances (BallTree over haversine)
+# ---------------------------------------------------------------------------
+
+
+def neighbor_distances(
+    data: pd.DataFrame,
     *,
     id_col: str,
     lat_col: str,
     lon_col: str,
-    altitude_col: Optional[str] = None,
-    k_neighbors: int = 5,
-    max_radius_km: Optional[float] = None,
-    max_abs_altitude_diff: Optional[float] = None,
-    include_self: bool = False,
-) -> Dict[object, List[object]]:
+    k: int,
+    include_self: bool = True,
+) -> pd.DataFrame:
     """
-    Build a dictionary mapping each station id to an ordered list of neighbor ids.
+    Compute K-nearest neighbor distances between station centroids.
 
-    This is a thin wrapper around :func:`neighbor_distances` that returns data
-    in a structure convenient for per-station modeling loops.
+    This function uses a :class:`sklearn.neighbors.BallTree` in haversine
+    space (radians) to obtain, for each station, its K nearest neighbors.
 
     Parameters
     ----------
-    df : DataFrame
-        Station metadata table; one row per station.
-    id_col, lat_col, lon_col : str
-        Column names for station id and geographic coordinates.
-    altitude_col : str or None
-        Optional altitude column used only for filtering by `max_abs_altitude_diff`.
-    k_neighbors : int
-        Number of neighbors to keep per station.
-    max_radius_km : float or None
-        Optional max great-circle distance in kilometers.
-    max_abs_altitude_diff : float or None
-        Optional max |Δ altitude| threshold (same units as altitude column).
-    include_self : bool
-        Whether to allow the station to appear as its own neighbor.
+    data : pandas.DataFrame
+        Long-format table with at least [id_col, lat_col, lon_col].
+    id_col : str
+        Station id column.
+    lat_col : str
+        Latitude column (degrees).
+    lon_col : str
+        Longitude column (degrees).
+    k : int
+        Desired number of neighbors **per station**. When `include_self`
+        is False, neighbors are strictly different stations. When `k`
+        is larger than the number of available stations, the function
+        gracefully caps the effective k to the maximum possible value.
+    include_self : bool, default True
+        If True, each station can appear as its own nearest neighbor in
+        the output. If False, self-pairs are removed and up to ``k``
+        distinct neighbors are kept.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Table with columns ``["from_id", "to_id", "distance_km"]`` where:
+
+        - ``from_id`` is the reference station id.
+        - ``to_id``   is the neighbor station id.
+        - ``distance_km`` is the great-circle distance in kilometers.
+    """
+    centroids = compute_station_centroids(
+        data,
+        id_col=id_col,
+        lat_col=lat_col,
+        lon_col=lon_col,
+    )
+
+    if centroids.empty:
+        return pd.DataFrame(columns=["from_id", "to_id", "distance_km"])
+
+    ids = centroids[id_col].to_numpy()
+    coords_deg = centroids[[lat_col, lon_col]].to_numpy(dtype=float)
+    coords_rad = np.radians(coords_deg)
+
+    n_stations = coords_rad.shape[0]
+    if n_stations == 0:
+        return pd.DataFrame(columns=["from_id", "to_id", "distance_km"])
+
+    # ------------------------------------------------------------------
+    # Determine a safe query_k for BallTree:
+    #
+    # - BallTree requires k <= n_stations.
+    # - If exclude self (include_self=False), we query k+1 and later drop
+    #   self, but still cap by n_stations.
+    # ------------------------------------------------------------------
+    k = int(max(1, k))
+    if include_self:
+        query_k = min(k, n_stations)
+    else:
+        query_k = min(k + 1, n_stations)
+
+    query_k = max(1, query_k)
+
+    tree = BallTree(coords_rad, metric="haversine")
+    dist_rad, ind = tree.query(coords_rad, k=query_k)
+
+    # distances in km
+    dist_km = dist_rad * EARTH_RADIUS_KM
+
+    rows: List[dict] = []
+    for i in range(n_stations):
+        from_id = ids[i]
+        for j_pos in range(query_k):
+            j = ind[i, j_pos]
+            to_id = ids[j]
+            d = float(dist_km[i, j_pos])
+            rows.append(
+                {
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "distance_km": d,
+                }
+            )
+
+    df_pairs = pd.DataFrame(rows)
+
+    if not include_self:
+        # Remove self-pairs
+        df_pairs = df_pairs[df_pairs["from_id"] != df_pairs["to_id"]]
+
+        # For each from_id, keep at most k closest neighbors
+        df_pairs = (
+            df_pairs.sort_values(["from_id", "distance_km"], kind="mergesort")
+            .groupby("from_id", as_index=False)
+            .head(k)
+        )
+
+    return df_pairs.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Neighbor map
+# ---------------------------------------------------------------------------
+
+
+def build_neighbor_map(
+    data: pd.DataFrame,
+    *,
+    id_col: str,
+    lat_col: str,
+    lon_col: str,
+    k: int,
+    include_self: bool = False,
+) -> Dict[Union[int, str], List[Union[int, str]]]:
+    """
+    Build a neighbor map: {station_id -> list_of_neighbor_ids}.
+
+    This is a convenience wrapper around :func:`neighbor_distances`.
+    It is mainly used by the imputation and evaluation engines to
+    restrict the training pool for each station.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Long-format dataset with at least [id_col, lat_col, lon_col].
+    id_col : str
+        Station id column.
+    lat_col : str
+        Latitude column (degrees).
+    lon_col : str
+        Longitude column (degrees).
+    k : int
+        Desired number of neighbors. If `include_self` is False, neighbors
+        are strictly different stations. When `k` is larger than the number
+        of available stations, the function gracefully caps the effective k.
+    include_self : bool, default False
+        If True, each station may appear in its own neighbor list; this is
+        rarely desired for training, so the default is False.
 
     Returns
     -------
     dict
-        { station_id: [neighbor_id_1, neighbor_id_2, ..., neighbor_id_k] }
-
-        Only stations with at least one neighbor under the filters are present.
-
-    Notes
-    -----
-    - The neighbor list is ordered by ascending Haversine distance, with
-      deterministic tie-breakers on neighbor id.
-    - If fewer than `k_neighbors` neighbors satisfy the filters, the list
-      can be shorter.
+        Dictionary mapping each station id to an ordered list of neighbor
+        ids (closest first). Stations with no neighbors (e.g. single-row
+        edge cases) appear with an empty list.
     """
-    table = neighbor_distances(
-        df,
+    if data.empty:
+        return {}
+
+    pairs = neighbor_distances(
+        data=data,
         id_col=id_col,
         lat_col=lat_col,
         lon_col=lon_col,
-        altitude_col=altitude_col,
-        k_neighbors=k_neighbors,
-        max_radius_km=max_radius_km,
-        max_abs_altitude_diff=max_abs_altitude_diff,
+        k=k,
         include_self=include_self,
     )
 
-    mapping: Dict[object, List[object]] = {}
-    if table.empty:
-        return mapping
+    neighbor_map: Dict[Union[int, str], List[Union[int, str]]] = {}
 
-    for sid, sub in table.groupby("station"):
-        # Already sorted by rank, then neighbor id
-        mapping[sid] = sub["neighbor"].tolist()
+    if pairs.empty:
+        # Ensure all stations appear with an empty list
+        for sid in data[id_col].dropna().unique().tolist():
+            neighbor_map[sid] = []
+        return neighbor_map
 
-    return mapping
+    # Initialize with empty lists for all stations present in the data
+    for sid in data[id_col].dropna().unique().tolist():
+        neighbor_map[sid] = []
+
+    # Populate neighbor lists, keeping order (already sorted in neighbor_distances)
+    for from_id, group in pairs.groupby("from_id", sort=False):
+        neighbor_map[from_id] = group["to_id"].tolist()
+
+    return neighbor_map
 
 
 __all__ = [
+    "EARTH_RADIUS_KM",
+    "haversine_distance",
+    "compute_station_centroids",
     "neighbor_distances",
     "build_neighbor_map",
-    "EARTH_RADIUS_KM",
 ]

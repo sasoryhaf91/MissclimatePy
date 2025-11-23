@@ -1,62 +1,51 @@
-# src/missclimatepy/masking.py
 # SPDX-License-Identifier: MIT
 """
-Missing-data exploration and masking utilities for MissclimatePy.
+missclimatepy.masking
+=====================
+
+Missing-data exploration and masking utilities for MissClimatePy.
 
 This module provides small, composable tools to:
+
 - quantify missingness per station over a target period,
 - profile gaps (consecutive missing runs) per station,
-- generate a 0/1 missingness matrix (stations × dates),
+- generate a station × date missingness matrix (daily cadence),
 - optionally apply deterministic masking to simulate missingness.
-
-All functions are column-name agnostic: callers must pass the names for
-station id, date, and target columns.
 
 Design notes
 ------------
-- We never rely on deprecated pandas timezone dtype checks.
-- Date columns are parsed once and made tz-naive if needed.
-- We treat the imputation problem as *daily* by construction. Functions that
-  build “full ranges” assume daily cadence.
-- All random masking is reproducible via a `random_state` seed.
 
-Key functions
--------------
-percent_missing_between     : % missing per station between start and end (inclusive).
-gap_profile_by_station      : number/mean/max length of consecutive missing runs.
-missing_matrix              : stations × dates uint8 matrix (1=observed, 0=missing).
-describe_missing            : consolidated per-station summary (coverage + gaps).
-apply_random_mask_by_station: simulate missingness per station at a target rate.
+* Column-name agnostic: callers must pass the names for station, date,
+  and target columns.
+* All operations are based on **daily** time steps by construction:
+  functions that "fill ranges" assume daily cadence.
+* Datetime columns are parsed once and made tz-naive via the shared
+  :func:`missclimatepy.features.ensure_datetime_naive` helper.
+* Random masking is reproducible via a `random_state` seed.
+
+Typical uses
+------------
+
+These utilities are meant for:
+
+- exploratory analysis of station-wise coverage and gap structure,
+- constructing reproducible missingness patterns for MDR experiments,
+- preparing station subsets for subsequent imputation/evaluation.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
+from .features import ensure_datetime_naive, validate_required_columns
+
 
 # ---------------------------------------------------------------------
-# Helpers
+# Internal helpers
 # ---------------------------------------------------------------------
-def _ensure_datetime_naive(series: pd.Series) -> pd.Series:
-    """
-    Parse datetimes and drop timezone if present (no deprecated dtype checks).
-    """
-    s = pd.to_datetime(series, errors="coerce")
-    try:
-        from pandas.api.types import DatetimeTZDtype  # type: ignore
-        if isinstance(s.dtype, DatetimeTZDtype):
-            s = s.dt.tz_localize(None)
-    except Exception:
-        # Fallback best-effort
-        try:
-            _ = s.dt
-            s = s.dt.tz_localize(None)
-        except Exception:
-            pass
-    return s
 
 
 def _daily_date_range(start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeIndex:
@@ -70,15 +59,11 @@ def _daily_date_range(start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeInde
     return pd.date_range(start, end, freq="D")
 
 
-def _require_columns(df: pd.DataFrame, cols: Sequence[str]) -> None:
-    miss = [c for c in cols if c not in df.columns]
-    if miss:
-        raise ValueError(f"Missing required columns: {miss}")
-
-
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
+
+
 def percent_missing_between(
     df: pd.DataFrame,
     *,
@@ -89,37 +74,46 @@ def percent_missing_between(
     end: str,
 ) -> pd.DataFrame:
     """
-    Percentage of missing values per station between two dates (inclusive).
+    Percentage of missing values per station in a fixed date window.
 
     The denominator is the full number of calendar days in [start, end],
-    regardless of whether a station has observations for every day. This
-    matches the intended definition for coverage over a fixed evaluation
-    window.
+    regardless of whether a station has observations for every day.
+    This matches the typical definition of coverage over a fixed
+    evaluation period.
 
     Parameters
     ----------
     df : DataFrame
-        Long table with at least (id_col, date_col, target_col).
+        Long-format table with at least (id_col, date_col, target_col).
     id_col, date_col, target_col : str
-        Column names.
+        Column names for station id, timestamp, and target variable.
     start, end : str
         Inclusive boundaries for the evaluation window.
 
     Returns
     -------
     DataFrame
-        Columns: [station, total_days, observed_days, missing_days, coverage, percent_missing]
-        Sorted by percent_missing descending (worst first).
+        Columns:
+
+        - ``station``         : station identifier (from ``id_col``),
+        - ``total_days``      : number of calendar days in [start, end],
+        - ``observed_days``   : distinct days with at least one non-null
+                                observation for ``target_col``,
+        - ``missing_days``    : ``total_days - observed_days``,
+        - ``coverage``        : ``observed_days / total_days``,
+        - ``percent_missing`` : 100 * ``missing_days / total_days``.
+
+        Sorted by ``percent_missing`` descending (worst coverage first).
     """
-    _require_columns(df, [id_col, date_col, target_col])
+    validate_required_columns(df, [id_col, date_col, target_col], context="percent_missing_between")
 
     work = df[[id_col, date_col, target_col]].copy()
-    work[date_col] = _ensure_datetime_naive(work[date_col])
+    work[date_col] = ensure_datetime_naive(work[date_col])
     work = work.dropna(subset=[date_col])
 
     window = _daily_date_range(pd.to_datetime(start), pd.to_datetime(end))
     if window.empty:
-        raise ValueError("Empty date window for percent_missing_between.")
+        raise ValueError("Empty date window in percent_missing_between.")
 
     # For each station, count distinct observed days within [start, end].
     in_win = (work[date_col] >= window[0]) & (work[date_col] <= window[-1])
@@ -134,18 +128,31 @@ def percent_missing_between(
 
     stations = work[id_col].dropna().unique()
     total_days = int(len(window))
+
     out = (
         pd.DataFrame({id_col: stations})
         .merge(observed, on=id_col, how="left")
         .fillna({"observed_days": 0})
     )
+
     out["total_days"] = total_days
     out["missing_days"] = out["total_days"] - out["observed_days"]
     out["coverage"] = out["observed_days"] / out["total_days"]
     out["percent_missing"] = 100.0 * (out["missing_days"] / out["total_days"])
+
     out = out.sort_values("percent_missing", ascending=False).reset_index(drop=True)
     out = out.rename(columns={id_col: "station"})
-    return out[["station", "total_days", "observed_days", "missing_days", "coverage", "percent_missing"]]
+
+    return out[
+        [
+            "station",
+            "total_days",
+            "observed_days",
+            "missing_days",
+            "coverage",
+            "percent_missing",
+        ]
+    ]
 
 
 def gap_profile_by_station(
@@ -159,37 +166,54 @@ def gap_profile_by_station(
     Profile consecutive missing runs per station over each station's own span.
 
     For each station:
-      - Build the inclusive daily date range from its min(date) to max(date).
-      - Mark a day as valid if target is non-null on that day (any record).
-      - Compute run-length encoding and summarize missing runs only.
+
+    1. Build the inclusive daily date range from its min(date) to max(date).
+    2. Mark a day as **observed** if ``target_col`` is non-null at least once
+       on that day.
+    3. Run-length encode the resulting boolean series and summarize only the
+       missing runs.
 
     Returns
     -------
     DataFrame
-        [station, n_gaps, mean_gap, max_gap]
-        where gaps are lengths (in days) of consecutive missing sequences.
+        Columns:
+
+        - ``station`` : station identifier,
+        - ``n_gaps``  : number of missing runs,
+        - ``mean_gap``: mean length of missing runs (days),
+        - ``max_gap`` : maximum gap length (days).
+
+        Stations with no gaps have ``n_gaps = 0``, ``mean_gap = 0.0``,
+        ``max_gap = 0``.
     """
-    _require_columns(df, [id_col, date_col, target_col])
+    validate_required_columns(df, [id_col, date_col, target_col], context="gap_profile_by_station")
 
     work = df[[id_col, date_col, target_col]].copy()
-    work[date_col] = _ensure_datetime_naive(work[date_col])
+    work[date_col] = ensure_datetime_naive(work[date_col])
     work = work.dropna(subset=[date_col])
 
     out_rows = []
+
     for sid, sub in work.groupby(id_col):
         dmin = sub[date_col].min()
         dmax = sub[date_col].max()
         full = _daily_date_range(dmin, dmax)
+
         if full.empty:
             out_rows.append({"station": sid, "n_gaps": 0, "mean_gap": 0.0, "max_gap": 0})
             continue
 
-        # Set of dates with at least one non-null observation for target
+        # Set of days with at least one non-null observation for target
         observed_days = set(
             sub.loc[~sub[target_col].isna(), date_col].dt.normalize().unique()
         )
+
         # Boolean valid vector aligned to 'full'
-        valid = np.fromiter((d in observed_days for d in full.normalize()), dtype=bool, count=len(full))
+        valid = np.fromiter(
+            (d.normalize() in observed_days for d in full),
+            dtype=bool,
+            count=len(full),
+        )
 
         if valid.size == 0:
             out_rows.append({"station": sid, "n_gaps": 0, "mean_gap": 0.0, "max_gap": 0})
@@ -204,6 +228,7 @@ def gap_profile_by_station(
         group_state = valid[first_indices]
 
         missing_lengths = lengths[~group_state] if lengths.size and (~group_state).any() else np.array([], dtype=int)
+
         if missing_lengths.size == 0:
             out_rows.append({"station": sid, "n_gaps": 0, "mean_gap": 0.0, "max_gap": 0})
         else:
@@ -215,6 +240,11 @@ def gap_profile_by_station(
                     "max_gap": int(np.max(missing_lengths)),
                 }
             )
+
+    if not out_rows:
+        return pd.DataFrame(
+            columns=["station", "n_gaps", "mean_gap", "max_gap"], dtype=object
+        )
 
     return (
         pd.DataFrame(out_rows)[["station", "n_gaps", "mean_gap", "max_gap"]]
@@ -240,48 +270,57 @@ def missing_matrix(
     Parameters
     ----------
     df : DataFrame
-        Long table with at least (id_col, date_col, target_col).
+        Long-format table with at least (id_col, date_col, target_col).
     id_col, date_col, target_col : str
         Column names.
     start, end : str or None
-        Optional inclusive window to clip dates. If not provided, each station
-        uses its own [min(date), max(date)] span.
-    sort_by_coverage : bool
+        Optional inclusive window to clip dates. If provided, all stations are
+        evaluated on the **same** [start, end] interval. If not provided,
+        each station uses its own [min(date), max(date)] span.
+    sort_by_coverage : bool, default True
         If True, sort stations by descending coverage (more observed first).
-    as_uint8 : bool
-        If True, return matrix as uint8 to reduce memory.
+    as_uint8 : bool, default True
+        If True, return the underlying matrix as uint8 (0/1) to reduce memory.
 
     Returns
     -------
     DataFrame
-        Index = station, columns = dates (daily), values in {0,1}.
+        Index = station, columns = dates (daily), values in {0, 1}.
     """
-    _require_columns(df, [id_col, date_col, target_col])
+    validate_required_columns(df, [id_col, date_col, target_col], context="missing_matrix")
 
     work = df[[id_col, date_col, target_col]].copy()
-    work[date_col] = _ensure_datetime_naive(work[date_col])
+    work[date_col] = ensure_datetime_naive(work[date_col])
     work = work.dropna(subset=[date_col])
 
     if start is not None and end is not None:
         win = _daily_date_range(pd.to_datetime(start), pd.to_datetime(end))
         if win.empty:
-            raise ValueError("Empty date window for missing_matrix.")
+            raise ValueError("Empty date window in missing_matrix.")
+
         observed = (
             work.loc[
-                (work[date_col] >= win[0]) &
-                (work[date_col] <= win[-1]) &
-                ~work[target_col].isna(),
+                (work[date_col] >= win[0])
+                & (work[date_col] <= win[-1])
+                & ~work[target_col].isna(),
                 [id_col, date_col],
             ]
             .drop_duplicates()
         )
         observed["val"] = 1
         mat = (
-            observed.pivot_table(index=id_col, columns=date_col, values="val", fill_value=0, aggfunc="max")
+            observed.pivot_table(
+                index=id_col,
+                columns=date_col,
+                values="val",
+                fill_value=0,
+                aggfunc="max",
+            )
             .reindex(columns=win, fill_value=0)
         )
     else:
-        # station-specific span
+        # station-specific span: for each station, we normalize dates to
+        # daily resolution and then pivot.
         work = work.assign(val=(~work[target_col].isna()).astype(np.int8))
         day = work.copy()
         day[date_col] = day[date_col].dt.normalize()
@@ -291,7 +330,7 @@ def missing_matrix(
     if as_uint8:
         mat = mat.astype("uint8")
 
-    if sort_by_coverage:
+    if sort_by_coverage and not mat.empty:
         coverage = mat.mean(axis=1)
         mat = mat.loc[coverage.sort_values(ascending=False).index]
 
@@ -317,8 +356,17 @@ def describe_missing(
     Returns
     -------
     DataFrame
-        [station, total_days, observed_days, missing_days, coverage, percent_missing,
-         n_gaps, mean_gap, max_gap]
+        Columns:
+
+        - ``station``         : station identifier,
+        - ``total_days``      : calendar days in the coverage window,
+        - ``observed_days``   : days with at least one non-null observation,
+        - ``missing_days``    : ``total_days - observed_days``,
+        - ``coverage``        : ``observed_days / total_days``,
+        - ``percent_missing`` : 100 * ``missing_days / total_days``,
+        - ``n_gaps``          : number of missing runs,
+        - ``mean_gap``        : mean gap length (days),
+        - ``max_gap``         : maximum gap length (days).
     """
     if start is not None and end is not None:
         cov = percent_missing_between(
@@ -330,9 +378,10 @@ def describe_missing(
             end=end,
         )
     else:
-        _require_columns(df, [id_col, date_col, target_col])
+        # Coverage over each station's native span
+        validate_required_columns(df, [id_col, date_col, target_col], context="describe_missing")
         work = df[[id_col, date_col, target_col]].copy()
-        work[date_col] = _ensure_datetime_naive(work[date_col])
+        work[date_col] = ensure_datetime_naive(work[date_col])
         work = work.dropna(subset=[date_col])
 
         rows = []
@@ -352,11 +401,15 @@ def describe_missing(
                     }
                 )
                 continue
-            obs_days = set(sub.loc[~sub[target_col].isna(), date_col].dt.normalize().unique())
+
+            obs_days = set(
+                sub.loc[~sub[target_col].isna(), date_col].dt.normalize().unique()
+            )
             observed_days = len(obs_days)
             total_days = len(full)
             missing_days = total_days - observed_days
             coverage = observed_days / total_days
+
             rows.append(
                 {
                     "station": sid,
@@ -367,13 +420,18 @@ def describe_missing(
                     "percent_missing": 100.0 * (missing_days / total_days),
                 }
             )
+
         cov = pd.DataFrame(rows)
 
-    gaps = gap_profile_by_station(df, id_col=id_col, date_col=date_col, target_col=target_col)
+    gaps = gap_profile_by_station(
+        df, id_col=id_col, date_col=date_col, target_col=target_col
+    )
     out = cov.merge(gaps, on="station", how="left")
+
     out[["n_gaps", "mean_gap", "max_gap"]] = out[["n_gaps", "mean_gap", "max_gap"]].fillna(
         {"n_gaps": 0, "mean_gap": 0.0, "max_gap": 0}
     )
+
     return (
         out[
             [
@@ -397,7 +455,7 @@ def apply_random_mask_by_station(
     df: pd.DataFrame,
     *,
     id_col: str,
-    date_col: str,
+    date_col: str,  # kept for symmetry, not used internally yet
     target_col: str,
     percent_to_mask: float,
     random_state: int = 42,
@@ -415,15 +473,15 @@ def apply_random_mask_by_station(
     df : DataFrame
         Input table.
     id_col, date_col, target_col : str
-        Column names.
+        Column names (``date_col`` is kept for symmetry with other helpers).
     percent_to_mask : float
-        Percentage in [0,100]. For each station, this fraction of *eligible*
+        Percentage in [0, 100]. For each station, this fraction of *eligible*
         rows will be set to NaN in ``target_col``.
-    random_state : int
-        Seed for reproducibility (applied per station).
-    only_with_observation : bool
-        If True, mask is sampled only among rows currently *observed*
-        (non-NaN). If False, mask can also pick rows that are already missing
+    random_state : int, default 42
+        Seed for reproducibility (applied at the global level).
+    only_with_observation : bool, default True
+        If True, sample the mask only among rows that are currently *observed*
+        (non-NaN). If False, rows already missing can also be selected
         (no-ops).
 
     Returns
@@ -434,12 +492,16 @@ def apply_random_mask_by_station(
     if percent_to_mask < 0 or percent_to_mask > 100:
         raise ValueError("percent_to_mask must be in [0, 100].")
 
-    _require_columns(df, [id_col, date_col, target_col])
+    validate_required_columns(df, [id_col, target_col], context="apply_random_mask_by_station")
     out = df.copy()
 
-    rng = np.random.RandomState(random_state)
-    for sid, sub_idx in out.groupby(id_col).groups.items():
-        idx = pd.Index(sub_idx)
+    # Global RNG; we derive station-specific RNGs from it to keep
+    # reproducibility but allow per-station independence if needed.
+    master_rng = np.random.RandomState(random_state)
+
+    for _, idx in out.groupby(id_col).groups.items():
+        idx = pd.Index(idx)
+
         if only_with_observation:
             eligible = idx[out.loc[idx, target_col].notna().values]
         else:
@@ -452,9 +514,11 @@ def apply_random_mask_by_station(
         if k <= 0:
             continue
 
-        # station-level deterministic draw: advance RNG with station hash
-        local_rng = np.random.RandomState(rng.randint(0, 2**31 - 1))
+        # Station-level deterministic draw
+        local_seed = master_rng.randint(0, 2**31 - 1)
+        local_rng = np.random.RandomState(local_seed)
         chosen = local_rng.choice(eligible.values, size=k, replace=False)
+
         out.loc[chosen, target_col] = np.nan
 
     return out

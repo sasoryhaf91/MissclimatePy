@@ -1,194 +1,221 @@
-# tests/test_impute.py
-# SPDX-License-Identifier: MIT
-"""
-Unit tests for missclimatepy.impute.impute_dataset
-
-These tests focus on:
-- basic schema and behaviour,
-- min_station_rows filtering,
-- include_target_pct semantics,
-- neighbour-based imputation with include_target_pct=0.
-"""
-
 import numpy as np
 import pandas as pd
+
 
 from missclimatepy.impute import impute_dataset
 
 
-def _make_simple_dataframe():
+def _make_simple_df():
     """
-    Create a small synthetic long-format dataset with two stations:
-    - S1: partial missingness
-    - S2: almost full observations
+    Helper: crea un DataFrame sencillo con 2 estaciones, 5 días y algunos NaN.
     """
-    dates = pd.date_range("2000-01-01", periods=10, freq="D")
+    dates = pd.date_range("2000-01-01", periods=5, freq="D")
+    data = []
+    for st in [1, 2]:
+        for d in dates:
+            data.append(
+                {
+                    "station": st,
+                    "date": d,
+                    "lat": 10.0 + st,
+                    "lon": -99.0 - st,
+                    "alt": 2000.0 + 10 * st,
+                    "target": np.nan,
+                }
+            )
+    df = pd.DataFrame(data)
 
-    df = pd.DataFrame({
-        "station": ["S1"] * 10 + ["S2"] * 10,
-        "date": list(dates) * 2,
-        "latitude": [19.0] * 10 + [20.0] * 10,
-        "longitude": [-99.0] * 10 + [-98.0] * 10,
-        "altitude": [2300.0] * 10 + [2400.0] * 10,
-        "tmin": np.concatenate([
-            np.array([10.0, 11.0, np.nan, 13.0, np.nan, 15.0, 16.0, np.nan, 18.0, 19.0]),
-            np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]),
-        ])
-    })
+    # Ponemos algunos valores observados
+    df.loc[(df["station"] == 1) & (df["date"] == dates[0]), "target"] = 1.0
+    df.loc[(df["station"] == 1) & (df["date"] == dates[1]), "target"] = 2.0
+    df.loc[(df["station"] == 2) & (df["date"] == dates[0]), "target"] = 5.0
     return df
 
 
-def test_impute_basic_schema_and_content():
-    """Basic smoke test: schema is correct and imputation runs."""
-    df = _make_simple_dataframe()
+# -------------------------------------------------------------------
+# Tests básicos de estructura
+# -------------------------------------------------------------------
+
+
+def test_impute_dataset_returns_expected_columns():
+    df = _make_simple_df()
 
     out = impute_dataset(
-        data=df,
+        df,
         id_col="station",
         date_col="date",
-        lat_col="latitude",
-        lon_col="longitude",
-        alt_col="altitude",
-        target_col="tmin",
-        start="2000-01-01",
-        end="2000-01-10",
-        k_neighbors=1,
-        min_station_rows=None,      # no MDR
-        include_target_pct=None,    # full visibility
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="target",
+        model_kind="rf",
+        rf_params={"n_estimators": 10, "random_state": 0},
         show_progress=False,
     )
 
-    # Columns and order
-    assert list(out.columns) == [
-        "station", "date", "latitude", "longitude", "altitude", "tmin", "source"
-    ]
+    expected_cols = ["station", "date", "lat", "lon", "alt", "target", "source"]
+    assert list(out.columns) == expected_cols
 
-    # Both stations must be present
-    assert set(out["station"].unique()) == {"S1", "S2"}
+    # Debe tener el mismo número de filas que el intervalo filtrado
+    assert len(out) == len(df)
 
-    # S2 has no missing values originally → all "observed"
-    s2 = out[out["station"] == "S2"].sort_values("date")
-    assert s2["tmin"].isna().sum() == 0
-    assert (s2["source"] == "observed").all()
 
-    # S1: where original df had values, they must remain unchanged
-    s1_in = df[df["station"] == "S1"].sort_values("date").reset_index(drop=True)
-    s1_out = out[out["station"] == "S1"].sort_values("date").reset_index(drop=True)
-    # For non-NaN original rows, imputed series must match
-    mask_obs = ~s1_in["tmin"].isna()
+def test_impute_dataset_marks_observed_and_imputed():
+    df = _make_simple_df()
+
+    out = impute_dataset(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="target",
+        model_kind="rf",
+        rf_params={"n_estimators": 10, "random_state": 0},
+        show_progress=False,
+    )
+
+    # Filas con valor original (no NaN en df) deben ser "observed"
+    merged = df.merge(
+        out,
+        on=["station", "date", "lat", "lon", "alt"],
+        suffixes=("_orig", "_imp"),
+        how="left",
+    )
+
+    obs_mask = merged["target_orig"].notna()
+    imp_mask = merged["target_orig"].isna()
+
+    assert set(merged.loc[obs_mask, "source"]) == {"observed"}
+    # Para filas originalmente NaN, deben existir algunas "imputed"
+    assert "imputed" in set(merged.loc[imp_mask, "source"])
+
+
+def test_impute_dataset_does_not_change_observed_values():
+    df = _make_simple_df()
+
+    out = impute_dataset(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="target",
+        model_kind="rf",
+        rf_params={"n_estimators": 10, "random_state": 0},
+        show_progress=False,
+    )
+
+    merged = df.merge(
+        out,
+        on=["station", "date", "lat", "lon", "alt"],
+        suffixes=("_orig", "_imp"),
+        how="left",
+    )
+
+    obs_mask = merged["target_orig"].notna()
+    # Los valores observados no deben cambiar
     assert np.allclose(
-        s1_out.loc[mask_obs, "tmin"].to_numpy(),
-        s1_in.loc[mask_obs, "tmin"].to_numpy(),
+        merged.loc[obs_mask, "target_orig"],
+        merged.loc[obs_mask, "target_imp"],
         equal_nan=False,
     )
 
 
-def test_min_station_rows_filters_stations():
-    """
-    min_station_rows > N: only stations with at least that many observed
-    rows are imputed and returned.
-    """
-    df = _make_simple_dataframe()
+# -------------------------------------------------------------------
+# Tests del backend MCM
+# -------------------------------------------------------------------
 
-    # Impose a high MDR so that S1 is excluded and only S2 remains
+
+def test_impute_dataset_mcm_backend_fills_missing():
+    df = _make_simple_df()
+
+    # Usamos sólo una estación para que la climatología sea trivial
+    df1 = df[df["station"] == 1].copy()
+
     out = impute_dataset(
-        data=df,
+        df1,
         id_col="station",
         date_col="date",
-        lat_col="latitude",
-        lon_col="longitude",
-        alt_col="altitude",
-        target_col="tmin",
-        start="2000-01-01",
-        end="2000-01-10",
-        k_neighbors=1,
-        min_station_rows=9,      # S1 has fewer non-NaN rows than S2
-        include_target_pct=None,
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="target",
+        model_kind="mcm",
+        mcm_mode="global",
+        mcm_min_samples=1,
         show_progress=False,
     )
 
-    stations = set(out["station"].unique())
-    assert stations == {"S2"}
-    # S2 should remain fully observed
-    assert out["tmin"].isna().sum() == 0
-    assert (out["source"] == "observed").all()
+    # No debe quedar ningún NaN en target
+    assert out["target"].notna().all()
 
-
-def test_include_target_pct_partial_visibility_preserves_observed():
-    """
-    include_target_pct < 100: the model sees only part of the target
-    station history, but all observed values must be preserved in the output.
-    """
-    df = _make_simple_dataframe()
-
-    out = impute_dataset(
-        data=df,
-        id_col="station",
-        date_col="date",
-        lat_col="latitude",
-        lon_col="longitude",
-        alt_col="altitude",
-        target_col="tmin",
-        start="2000-01-01",
-        end="2000-01-10",
-        k_neighbors=1,
-        min_station_rows=None,
-        include_target_pct=50.0,   # only half of local history in training
-        show_progress=False,
+    # Los días que tenían datos observados deben conservarse
+    merged = df1.merge(
+        out,
+        on=["station", "date", "lat", "lon", "alt"],
+        suffixes=("_orig", "_imp"),
+        how="left",
     )
 
-    s1_in = df[df["station"] == "S1"].sort_values("date").reset_index(drop=True)
-    s1_out = out[out["station"] == "S1"].sort_values("date").reset_index(drop=True)
-
-    # Observed entries must remain exactly the same, even if not used in training
-    mask_obs = ~s1_in["tmin"].isna()
+    obs_mask = merged["target_orig"].notna()
     assert np.allclose(
-        s1_out.loc[mask_obs, "tmin"].to_numpy(),
-        s1_in.loc[mask_obs, "tmin"].to_numpy(),
+        merged.loc[obs_mask, "target_orig"],
+        merged.loc[obs_mask, "target_imp"],
         equal_nan=False,
     )
 
 
-def test_include_target_pct_zero_with_neighbors_allows_loso_imputation():
-    """
-    include_target_pct=0 with neighbours: the station is imputed using
-    only neighbour information (extreme LOSO scenario).
-    """
-    # Simple scenario: S1 has missing data; S2 has constant value 5.
-    dates = pd.date_range("2000-01-01", periods=5, freq="D")
-    df = pd.DataFrame({
-        "station": ["S1"] * 5 + ["S2"] * 5,
-        "date": list(dates) * 2,
-        "latitude": [19.0] * 5 + [20.0] * 5,
-        "longitude": [-99.0] * 5 + [-98.0] * 5,
-        "altitude": [2300.0] * 5 + [2400.0] * 5,
-        # S1: all NaN; S2: all 5.0
-        "tmin": np.concatenate([
-            np.array([np.nan] * 5),
-            np.array([5.0] * 5),
-        ])
-    })
+# -------------------------------------------------------------------
+# Tests de selección de estaciones
+# -------------------------------------------------------------------
 
+
+def test_impute_dataset_respects_station_ids_filter():
+    df = _make_simple_df()
+
+    # Sólo imputamos la estación 1
     out = impute_dataset(
-        data=df,
+        df,
         id_col="station",
         date_col="date",
-        lat_col="latitude",
-        lon_col="longitude",
-        alt_col="altitude",
-        target_col="tmin",
-        start="2000-01-01",
-        end="2000-01-05",
-        k_neighbors=1,           # S1 will see S2 as neighbour
-        min_station_rows=None,
-        include_target_pct=0.0,  # S1 contributes 0 local rows to training
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="target",
+        station_ids=[1],
+        model_kind="mcm",
+        mcm_mode="global",
+        mcm_min_samples=1,
         show_progress=False,
     )
 
-    s1_out = out[out["station"] == "S1"].sort_values("date").reset_index(drop=True)
+    # Sólo debe aparecer la estación 1 en el resultado
+    assert set(out["station"].unique()) == {1}
 
-    # All rows should be imputed (no observed values in S1)
-    assert (s1_out["source"] == "imputed").all()
-    # Predictions should be close to 5 (since S2 is constant 5.0)
-    assert np.allclose(s1_out["tmin"].to_numpy(), 5.0, atol=1e-6)
 
+def test_impute_dataset_with_min_station_rows_skips_small_stations():
+    df = _make_simple_df()
+
+    # Recortamos la estación 2 para que tenga muy pocas filas
+    df = df[~((df["station"] == 2) & (df["date"] > df["date"].min()))].copy()
+    # Ahora station=2 solo tiene 1 fila, station=1 tiene 5
+
+    out = impute_dataset(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="target",
+        min_station_rows=3,  # station 2 debe quedar fuera
+        model_kind="mcm",
+        mcm_mode="global",
+        mcm_min_samples=1,
+        show_progress=False,
+    )
+
+    assert set(out["station"].unique()) == {1}
