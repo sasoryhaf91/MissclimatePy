@@ -132,7 +132,7 @@ def plot_missing_matrix(
     """
     fig, ax, _ = _ensure_ax(ax, figsize)
 
-    validate_required_columns(df, [id_col, date_col, target_col], context="plot_missing_matrix")
+    validate_required_columns(df, [id_col, date_col, target_col])
 
     if df.empty or df[target_col].isna().all():
         return _no_data(ax, "No data (all missing)")
@@ -167,7 +167,7 @@ def plot_missing_matrix(
 
     # Sort stations by missingness (descending = more missing first)
     if sort_by_missing:
-        order = pivot.sum(axis=1).sort_values(ascending=True).index  # fewer present → more missing
+        order = pivot.sum(axis=1).sort_values(ascending=True).index
         pivot = pivot.loc[order]
 
     # Cap number of stations
@@ -242,13 +242,11 @@ def plot_metrics_distribution(
         return _no_data(ax, "No numeric metrics found")
 
     if kind == "box":
-        # Boxplot without deprecated 'labels' argument; we set tick labels manually
         series_list = [data[c].dropna().values for c in data.columns]
         ax.boxplot(series_list)
         ax.set_xticklabels(list(data.columns))
         ax.set_ylabel("Metric value")
     else:
-        # Histogram overlay; draw sequentially
         for col in data.columns:
             vals = data[col].dropna().values
             if vals.size == 0:
@@ -357,7 +355,7 @@ def plot_time_series_overlay(
     """
     fig, ax, _ = _ensure_ax(ax, figsize)
 
-    validate_required_columns(df, [id_col, date_col, y_true_col], context="plot_time_series_overlay")
+    validate_required_columns(df, [id_col, date_col, y_true_col])
 
     if df.empty:
         return _no_data(ax, "No time series data")
@@ -420,7 +418,7 @@ def plot_spatial_scatter(
     """
     fig, ax, _ = _ensure_ax(ax, figsize)
 
-    validate_required_columns(df, [lat_col, lon_col, value_col], context="plot_spatial_scatter")
+    validate_required_columns(df, [lat_col, lon_col, value_col])
 
     if df.empty:
         return _no_data(ax, "No spatial data")
@@ -533,7 +531,7 @@ def plot_imputed_series(
         return _no_data(ax, "Empty dataframe: nothing to plot.")
 
     required = [id_col, date_col, target_col, source_col]
-    validate_required_columns(df, required, context="plot_imputed_series")
+    validate_required_columns(df, required)
 
     # Filter single station and optional window
     sub = df[df[id_col] == station].copy()
@@ -616,7 +614,7 @@ def plot_imputation_coverage(
     if df.empty:
         return _no_data(ax, "Empty dataframe.")
 
-    validate_required_columns(df, [id_col, source_col], context="plot_imputation_coverage")
+    validate_required_columns(df, [id_col, source_col])
 
     # Ratios per station
     tab = (

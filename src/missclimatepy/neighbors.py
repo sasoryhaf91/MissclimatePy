@@ -1,16 +1,14 @@
+# src/missclimatepy/neighbors.py
 # SPDX-License-Identifier: MIT
 """
-missclimatepy.neighbors
-=======================
-
 Spatial neighbor utilities for MissClimatePy.
 
 This module provides small, focused helpers to work with station
-coordinates on the sphere (lat/lon in degrees) and to build
+coordinates on the sphere (latitude/longitude in degrees) and to build
 neighbor structures based on great-circle distances:
 
 - :func:`haversine_distance`:
-    Vectorized great-circle distance (km) between two points.
+    Vectorized great-circle distance (km) between two sets of points.
 - :func:`compute_station_centroids`:
     Reduce a long table to one row per station, with mean latitude/longitude.
 - :func:`neighbor_distances`:
@@ -58,7 +56,7 @@ def haversine_distance(
     Returns
     -------
     np.ndarray
-        Distances in kilometers, with the usual broadcasting semantics.
+        Distances in kilometers, with standard NumPy broadcasting.
     """
     lat1_rad = np.radians(lat1)
     lon1_rad = np.radians(lon1)
@@ -151,10 +149,10 @@ def neighbor_distances(
     lon_col : str
         Longitude column (degrees).
     k : int
-        Desired number of neighbors **per station**. When `include_self`
-        is False, neighbors are strictly different stations. When `k`
+        Desired number of neighbors **per station**. When ``include_self``
+        is False, neighbors are strictly different stations. When ``k``
         is larger than the number of available stations, the function
-        gracefully caps the effective k to the maximum possible value.
+        caps the effective k to the maximum possible value.
     include_self : bool, default True
         If True, each station can appear as its own nearest neighbor in
         the output. If False, self-pairs are removed and up to ``k``
@@ -187,13 +185,8 @@ def neighbor_distances(
     if n_stations == 0:
         return pd.DataFrame(columns=["from_id", "to_id", "distance_km"])
 
-    # ------------------------------------------------------------------
-    # Determine a safe query_k for BallTree:
-    #
-    # - BallTree requires k <= n_stations.
-    # - If exclude self (include_self=False), we query k+1 and later drop
-    #   self, but still cap by n_stations.
-    # ------------------------------------------------------------------
+    # BallTree requires k <= n_stations.
+    # If exclude self (include_self=False), we query k+1 and later drop self.
     k = int(max(1, k))
     if include_self:
         query_k = min(k, n_stations)
@@ -271,9 +264,9 @@ def build_neighbor_map(
     lon_col : str
         Longitude column (degrees).
     k : int
-        Desired number of neighbors. If `include_self` is False, neighbors
-        are strictly different stations. When `k` is larger than the number
-        of available stations, the function gracefully caps the effective k.
+        Desired number of neighbors. If ``include_self`` is False, neighbors
+        are strictly different stations. When ``k`` is larger than the number
+        of available stations, the function caps the effective k.
     include_self : bool, default False
         If True, each station may appear in its own neighbor list; this is
         rarely desired for training, so the default is False.
@@ -323,3 +316,4 @@ __all__ = [
     "neighbor_distances",
     "build_neighbor_map",
 ]
+

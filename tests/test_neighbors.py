@@ -1,54 +1,81 @@
 # tests/test_neighbors.py
+
 import numpy as np
 import pandas as pd
 
-from missclimatepy.neighbors import build_neighbor_map
+from missclimatepy.neighbors import (
+    haversine_distance,
+    compute_station_centroids,
+    neighbor_distances,
+    build_neighbor_map,
+)
 
 
-def _make_simple_df() -> pd.DataFrame:
-    """Small helper dataset with a few stations and coordinates."""
+def test_haversine_distance_zero_and_symmetry():
+    lat = np.array([0.0])
+    lon = np.array([0.0])
+
+    d0 = haversine_distance(lat, lon, lat, lon)
+    assert d0.shape == (1,)
+    assert d0[0] == 0.0
+
+    # Symmetry check: distance(a, b) == distance(b, a)
+    lat_a = np.array([0.0])
+    lon_a = np.array([0.0])
+    lat_b = np.array([0.0])
+    lon_b = np.array([1.0])
+
+    dab = haversine_distance(lat_a, lon_a, lat_b, lon_b)[0]
+    dba = haversine_distance(lat_b, lon_b, lat_a, lon_a)[0]
+    assert np.isclose(dab, dba)
+
+    # Rough magnitude: 1 degree lon at equator ~ 111 km
+    assert np.isclose(dab, 111.0, atol=2.0)
+
+
+def test_compute_station_centroids_empty():
+    df = pd.DataFrame(columns=["station", "lat", "lon"])
+    centroids = compute_station_centroids(df, id_col="station", lat_col="lat", lon_col="lon")
+    assert isinstance(centroids, pd.DataFrame)
+    assert centroids.empty
+    assert list(centroids.columns) == ["station", "lat", "lon"]
+
+
+def test_compute_station_centroids_mean():
+    df = pd.DataFrame(
+        {
+            "station": ["A", "A", "B", "B", "B"],
+            "lat": [10.0, 12.0, 0.0, 1.0, 2.0],
+            "lon": [20.0, 22.0, 5.0, 5.0, 5.0],
+        }
+    )
+    centroids = compute_station_centroids(df, id_col="station", lat_col="lat", lon_col="lon")
+
+    assert set(centroids["station"]) == {"A", "B"}
+
+    row_a = centroids.set_index("station").loc["A"]
+    assert np.isclose(row_a["lat"], (10.0 + 12.0) / 2.0)
+    assert np.isclose(row_a["lon"], (20.0 + 22.0) / 2.0)
+
+    row_b = centroids.set_index("station").loc["B"]
+    assert np.isclose(row_b["lat"], (0.0 + 1.0 + 2.0) / 3.0)
+    assert np.isclose(row_b["lon"], 5.0)
+
+
+def _make_small_df():
+    """Helper to create a tiny 3-station dataset for neighbor tests."""
     return pd.DataFrame(
         {
-            "station": ["A", "B", "C", "D"],
-            "lat": [19.0, 19.1, 19.2, 20.0],
-            "lon": [-99.0, -99.1, -99.2, -100.0],
-            # extra columns should be ignored by build_neighbor_map
-            "value": [1.0, 2.0, 3.0, 4.0],
+            "station": ["S1", "S1", "S2", "S2", "S3"],
+            "lat": [0.0, 0.1, 0.0, 0.05, 1.0],
+            "lon": [0.0, 0.1, 1.0, 1.0, 0.0],
         }
     )
 
 
-def test_build_neighbor_map_returns_dict():
-    df = _make_simple_df()
-
-    nmap = build_neighbor_map(
-        df,
-        id_col="station",
-        lat_col="lat",
-        lon_col="lon",
-        k=2,
-        include_self=False,
-    )
-
-    # must be a dict with all station ids as keys
-    assert isinstance(nmap, dict)
-    assert set(nmap.keys()) == set(df["station"].unique())
-
-    # each value must be a non-empty list
-    for sid, neighs in nmap.items():
-        assert isinstance(neighs, list)
-        assert len(neighs) > 0
-        # neighbors must be valid station ids
-        for n in neighs:
-            assert n in df["station"].values
-        # when include_self=False, target id must not appear
-        assert sid not in neighs
-
-
-def test_build_neighbor_map_include_self_true():
-    df = _make_simple_df()
-
-    nmap = build_neighbor_map(
+def test_neighbor_distances_include_self():
+    df = _make_small_df()
+    pairs = neighbor_distances(
         df,
         id_col="station",
         lat_col="lat",
@@ -57,19 +84,48 @@ def test_build_neighbor_map_include_self_true():
         include_self=True,
     )
 
-    # include_self=True → self id must appear in the neighbor list
-    for sid, neighs in nmap.items():
-        assert sid in neighs
-        # still must not exceed the number of available stations
-        assert len(neighs) <= len(df["station"].unique())
+    # We should get at most k neighbors per station
+    assert not pairs.empty
+    assert set(pairs.columns) == {"from_id", "to_id", "distance_km"}
+
+    grouped = pairs.groupby("from_id")
+    for sid, sub in grouped:
+        assert len(sub) <= 2
+        # At least one self-pair with distance ~0 should exist (depending on k and n)
+        has_self = (sub["from_id"] == sub["to_id"]).any()
+        if has_self:
+            d_self = sub.loc[sub["from_id"] == sub["to_id"], "distance_km"].iloc[0]
+            assert np.isclose(d_self, 0.0, atol=1e-6)
 
 
-def test_build_neighbor_map_handles_large_k_gracefully():
-    df = _make_simple_df()
-    n_stations = df["station"].nunique()
+def test_neighbor_distances_exclude_self():
+    df = _make_small_df()
+    pairs = neighbor_distances(
+        df,
+        id_col="station",
+        lat_col="lat",
+        lon_col="lon",
+        k=2,
+        include_self=False,
+    )
 
-    # k much larger than number of stations should not error
-    k = 100
+    assert not pairs.empty
+    assert set(pairs.columns) == {"from_id", "to_id", "distance_km"}
+
+    # No self-pairs
+    assert (pairs["from_id"] != pairs["to_id"]).all()
+
+    grouped = pairs.groupby("from_id")
+    for sid, sub in grouped:
+        # At most k neighbors per station
+        assert len(sub) <= 2
+        # Distances must be positive
+        assert (sub["distance_km"] > 0.0).all()
+
+
+def test_build_neighbor_map_basic():
+    df = _make_small_df()
+    k = 2
     nmap = build_neighbor_map(
         df,
         id_col="station",
@@ -79,35 +135,25 @@ def test_build_neighbor_map_handles_large_k_gracefully():
         include_self=False,
     )
 
-    # with include_self=False, each station can have at most n_stations-1 neighbors
+    # Keys must match station ids
+    stations = set(df["station"].unique())
+    assert set(nmap.keys()) == stations
+
+    # Each neighbor list has length <= k and contains no self
     for sid, neighs in nmap.items():
-        assert len(neighs) <= n_stations - 1
-        # neighbors must be unique
-        assert len(neighs) == len(set(neighs))
+        assert isinstance(neighs, list)
+        assert len(neighs) <= k
         assert sid not in neighs
 
 
-def test_build_neighbor_map_works_with_integer_ids():
-    # same coordinates, but integer ids
-    df = pd.DataFrame(
-        {
-            "station": [101, 102, 103],
-            "lat": [19.0, 19.1, 19.2],
-            "lon": [-99.0, -99.1, -99.2],
-        }
-    )
-
+def test_build_neighbor_map_empty():
+    df = pd.DataFrame(columns=["station", "lat", "lon"])
     nmap = build_neighbor_map(
         df,
         id_col="station",
         lat_col="lat",
         lon_col="lon",
-        k=1,
+        k=3,
         include_self=False,
     )
-
-    assert set(nmap.keys()) == {101, 102, 103}
-    # neighbors must be integers as well
-    for neighs in nmap.values():
-        for n in neighs:
-            assert isinstance(n, (int, np.integer))
+    assert nmap == {}

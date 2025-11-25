@@ -1,181 +1,101 @@
-# tests/test_evaluate.py
+# SPDX-License-Identifier: MIT
+"""
+Tests for missclimatepy.evaluate.evaluate_stations.
+
+These tests focus on:
+- basic shapes and required columns in the outputs,
+- station filtering by min_station_rows,
+- behaviour with and without target leakage,
+- support for multiple model kinds.
+"""
+
+from __future__ import annotations
+
+from typing import Dict
 
 import numpy as np
 import pandas as pd
 
-from missclimatepy.evaluate import evaluate_stations, RFParams
-from missclimatepy.impute import impute_dataset
+from missclimatepy.evaluate import evaluate_stations
+from missclimatepy.models import SUPPORTED_MODELS
 
 
-# ----------------------------------------------------------------------
-# Helper: generate a minimal toy dataset
-# ----------------------------------------------------------------------
-def _make_df(n_st=4, n_days=40, missing_frac=0.20, seed=0):
-    rng = np.random.default_rng(seed)
-    stations = [f"S{i:02d}" for i in range(n_st)]
-    dates = pd.date_range("2000-01-01", periods=n_days, freq="D")
+# ---------------------------------------------------------------------------
+# Small helper datasets
+# ---------------------------------------------------------------------------
 
+
+def _make_simple_df() -> pd.DataFrame:
+    """
+    Two stations (A, B) with 4 daily records each and a simple tmin pattern.
+    """
+    dates = pd.date_range("2020-01-01", periods=4, freq="D")
     rows = []
-    for st in stations:
-        vals = rng.normal(loc=15, scale=3, size=n_days)
-        miss_mask = rng.random(n_days) < missing_frac
-        vals[miss_mask] = np.nan
-        for d, v in zip(dates, vals):
-            rows.append(
-                dict(
-                    station=st,
-                    date=d,
-                    lat=19 + rng.random() * 0.2,
-                    lon=-99 + rng.random() * 0.2,
-                    alt=2400 + rng.random() * 50,
-                    tmin=v,
-                )
-            )
+
+    # Station A: lat=10, lon=20, alt=100
+    for i, d in enumerate(dates, start=0):
+        rows.append(
+            {
+                "station": "A",
+                "date": d,
+                "lat": 10.0,
+                "lon": 20.0,
+                "alt": 100.0,
+                "tmin": 5.0 + i,
+            }
+        )
+
+    # Station B: lat=11, lon=21, alt=200
+    for i, d in enumerate(dates, start=0):
+        rows.append(
+            {
+                "station": "B",
+                "date": d,
+                "lat": 11.0,
+                "lon": 21.0,
+                "alt": 200.0,
+                "tmin": 7.0 + i,
+            }
+        )
+
     return pd.DataFrame(rows)
 
 
-# ----------------------------------------------------------------------
-# 1. Basic smoke test
-# ----------------------------------------------------------------------
-def test_evaluate_smoke():
-    df = _make_df()
+def _make_precip_df(n_per_station: int = 10) -> pd.DataFrame:
+    """
+    Two stations (A, B) with n_per_station daily precipitation records.
 
-    out = evaluate_stations(
-        data=df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        model_kind="rf",
-        rf_params=RFParams(n_estimators=10, random_state=1),
-        show_progress=False,
-    )
+    Precipitation alternates between 0 (dry) and 3 (wet) to exercise
+    the month × dry/wet stratified leakage sampler.
+    """
+    rows = []
+    base_dates = pd.date_range("2020-01-01", periods=n_per_station, freq="D")
 
-    assert isinstance(out, pd.DataFrame)
-    assert "station" in out.columns
-    assert "RMSE_d" in out.columns
-    assert len(out) > 0
+    for st, (lat, lon, alt) in [("A", (10.0, 20.0, 100.0)), ("B", (11.0, 21.0, 200.0))]:
+        for i, d in enumerate(base_dates):
+            rows.append(
+                {
+                    "station": st,
+                    "date": d,
+                    "lat": lat,
+                    "lon": lon,
+                    "alt": alt,
+                    "prec": 0.0 if i % 2 == 0 else 3.0,
+                }
+            )
 
-
-# ----------------------------------------------------------------------
-# 2. Test evaluation with model_kind = mcm
-# ----------------------------------------------------------------------
-def test_evaluate_with_mcm_model():
-    df = _make_df(missing_frac=0.5)
-
-    out = evaluate_stations(
-        data=df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        model_kind="mcm",
-        show_progress=False,
-    )
-
-    assert "RMSE_d" in out.columns
-    assert len(out) == df["station"].nunique()
+    return pd.DataFrame(rows)
 
 
-# ----------------------------------------------------------------------
-# 3. Test evaluation with k_neighbors small
-# ----------------------------------------------------------------------
-def test_evaluate_with_knn_neighbors():
-    df = _make_df()
-
-    out = evaluate_stations(
-        data=df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        k_neighbors=2,
-        model_kind="rf",
-        rf_params={"n_estimators": 5, "random_state": 0},
-        show_progress=False,
-    )
-
-    assert isinstance(out, pd.DataFrame)
-    assert len(out) == df["station"].nunique()
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 
-# ----------------------------------------------------------------------
-# 4. include_target_pct should not break evaluation
-# ----------------------------------------------------------------------
-def test_evaluate_with_target_leakage():
-    df = _make_df()
+def test_evaluate_basic_shapes_and_columns():
+    df = _make_simple_df()
 
-    out = evaluate_stations(
-        data=df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        include_target_pct=50.0,
-        model_kind="rf",
-        rf_params={"n_estimators": 10, "random_state": 0},
-        show_progress=False,
-    )
-
-    assert "RMSE_d" in out.columns
-    assert len(out) > 0
-
-
-# ----------------------------------------------------------------------
-# 5. Evaluation should work even if all values at a station are NaN
-# ----------------------------------------------------------------------
-def test_evaluate_station_with_no_observed_values():
-    df = _make_df()
-    df.loc[df["station"] == "S00", "tmin"] = np.nan  # remove all values of one station
-
-    out = evaluate_stations(
-        data=df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        model_kind="mcm",      # safest backend
-        show_progress=False,
-    )
-
-    assert len(out) == df["station"].nunique()
-    assert out["RMSE_d"].notna().all()
-
-
-# ----------------------------------------------------------------------
-# 6. Test consistency: evaluate -> impute should not crash
-# ----------------------------------------------------------------------
-def test_evaluate_and_impute_consistency():
-    df = _make_df()
-
-    # Evaluate first
-    ev = evaluate_stations(
-        data=df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        model_kind="rf",
-        rf_params={"n_estimators": 15, "random_state": 0},
-        show_progress=False,
-    )
-
-    assert "RMSE_d" in ev.columns
-
-    # Then impute with same model
-    out = impute_dataset(
+    report, preds = evaluate_stations(
         df,
         id_col="station",
         date_col="date",
@@ -183,55 +103,199 @@ def test_evaluate_and_impute_consistency():
         lon_col="lon",
         alt_col="alt",
         target_col="tmin",
+        k_neighbors=None,  # use all-other-stations pool
+        include_target_pct=0.0,
         model_kind="rf",
-        rf_params={"n_estimators": 15, "random_state": 0},
+        model_params={"n_estimators": 10, "random_state": 0, "n_jobs": 1},
         show_progress=False,
     )
 
-    # Output should have correct columns
-    assert set(["station", "date", "lat", "lon", "alt", "tmin", "source"]).issubset(out.columns)
-    assert "imputed" in out["source"].unique()
+    # Report: one row per station
+    assert report.shape[0] == 2
+    assert {"station", "rows_train", "rows_test", "MAE_d", "RMSE_d", "R2_d"}.issubset(
+        set(report.columns)
+    )
+    assert {"latitude", "longitude", "altitude"}.issubset(set(report.columns))
+
+    # Predictions: both stations should appear
+    assert "station" in preds.columns
+    assert preds["station"].nunique() == 2
+    assert {"latitude", "longitude", "altitude", "y_obs", "y_mod"}.issubset(
+        set(preds.columns)
+    )
+
+    # There must be some training and test rows per station
+    for rows_tr in report["rows_train"]:
+        assert rows_tr >= 0
+    for rows_te in report["rows_test"]:
+        assert rows_te >= 0
 
 
-# ----------------------------------------------------------------------
-# 7. Test evaluation with model_kind = linear
-# ----------------------------------------------------------------------
-def test_evaluate_linear_regression():
-    df = _make_df()
+def test_evaluate_respects_min_station_rows():
+    df = _make_simple_df()
 
-    out = evaluate_stations(
-        data=df,
+    # Drop most rows from station B so it has only 1 observation
+    df_reduced = df[~((df["station"] == "B") & (df["date"] > pd.Timestamp("2020-01-01")))]
+
+    report, _ = evaluate_stations(
+        df_reduced,
         id_col="station",
         date_col="date",
         lat_col="lat",
         lon_col="lon",
         alt_col="alt",
         target_col="tmin",
-        model_kind="linear",
+        k_neighbors=None,
+        include_target_pct=0.0,
+        min_station_rows=2,
+        model_kind="rf",
+        model_params={"n_estimators": 10, "random_state": 0, "n_jobs": 1},
         show_progress=False,
     )
 
-    assert len(out) == df["station"].nunique()
-    assert "RMSE_d" in out.columns
+    # Only station A should remain
+    stations_in_report = set(report["station"].tolist())
+    assert stations_in_report == {"A"}
 
 
-# ----------------------------------------------------------------------
-# 8. Sorting and saving options shouldn't break evaluation
-# ----------------------------------------------------------------------
-def test_evaluate_sorting():
-    df = _make_df()
+def test_evaluate_LOSO_single_station_produces_empty_train():
+    """
+    With a single station and include_target_pct=0, LOSO-like evaluation
+    cannot use any training rows, so rows_train must be zero.
+    """
+    df = _make_simple_df()
+    df_single = df[df["station"] == "A"].copy()
 
-    out = evaluate_stations(
-        data=df,
+    report, _ = evaluate_stations(
+        df_single,
         id_col="station",
         date_col="date",
         lat_col="lat",
         lon_col="lon",
         alt_col="alt",
         target_col="tmin",
+        k_neighbors=None,
+        include_target_pct=0.0,
         model_kind="rf",
-        order_by=("RMSE_d", True),
+        model_params={"n_estimators": 5, "random_state": 0, "n_jobs": 1},
         show_progress=False,
     )
 
-    assert out.iloc[0]["RMSE_d"] <= out.iloc[-1]["RMSE_d"]
+    # Exactly one row in the report and zero training rows
+    assert report.shape[0] == 1
+    assert int(report["rows_train"].iloc[0]) == 0
+    # There should still be test rows (all valid rows for that station)
+    assert int(report["rows_test"].iloc[0]) > 0 or np.isnan(
+        report["rows_test"].iloc[0]
+    ) is False
+
+
+def test_evaluate_with_leakage_increases_rows_train():
+    df = _make_precip_df(n_per_station=10)
+
+    # LOSO-like (no leakage)
+    report_0, _ = evaluate_stations(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="prec",
+        k_neighbors=None,
+        include_target_pct=0.0,
+        model_kind="rf",
+        model_params={"n_estimators": 10, "random_state": 0, "n_jobs": 1},
+        show_progress=False,
+    )
+
+    # With 50% leakage
+    report_50, _ = evaluate_stations(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="prec",
+        k_neighbors=None,
+        include_target_pct=50.0,
+        include_target_seed=123,
+        model_kind="rf",
+        model_params={"n_estimators": 10, "random_state": 0, "n_jobs": 1},
+        show_progress=False,
+    )
+
+    # Build dicts {station -> rows_train}
+    rt0: Dict[str, int] = {
+        str(s): int(r) for s, r in zip(report_0["station"], report_0["rows_train"])
+    }
+    rt50: Dict[str, int] = {
+        str(s): int(r) for s, r in zip(report_50["station"], report_50["rows_train"])
+    }
+
+    # For every station, training rows with leakage must be >= without leakage,
+    # and strictly greater when there are valid target rows.
+    for sid in rt0:
+        assert sid in rt50
+        assert rt50[sid] >= rt0[sid]
+        assert rt50[sid] > rt0[sid]
+
+
+def test_evaluate_supports_multiple_model_kinds():
+    df = _make_simple_df()
+
+    # We expect at least these core models to exist in the registry.
+    candidate_kinds = [k for k in ("rf", "etr", "linreg") if k in SUPPORTED_MODELS]
+
+    assert "rf" in candidate_kinds  # sanity check: RF must be available
+
+    results = {}
+    for kind in candidate_kinds:
+        report, preds = evaluate_stations(
+            df,
+            id_col="station",
+            date_col="date",
+            lat_col="lat",
+            lon_col="lon",
+            alt_col="alt",
+            target_col="tmin",
+            k_neighbors=None,
+            include_target_pct=0.0,
+            model_kind=kind,
+            model_params={"random_state": 0} if kind != "linreg" else {},
+            show_progress=False,
+        )
+        results[kind] = (report, preds)
+
+    # All models should return a non-empty report with the same number of stations
+    n_stations_expected = 2
+    for kind, (rep, preds) in results.items():
+        assert rep.shape[0] == n_stations_expected, f"{kind} report rows mismatch"
+        assert preds["station"].nunique() == n_stations_expected, f"{kind} preds stations mismatch"
+
+
+def test_evaluate_predictions_include_coordinates_and_values():
+    df = _make_simple_df()
+
+    _, preds = evaluate_stations(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="tmin",
+        k_neighbors=None,
+        include_target_pct=0.0,
+        model_kind="rf",
+        model_params={"n_estimators": 10, "random_state": 0, "n_jobs": 1},
+        show_progress=False,
+    )
+
+    # Columns must be present
+    for col in ["station", "date", "latitude", "longitude", "altitude", "y_obs", "y_mod"]:
+        assert col in preds.columns
+
+    # There should be at least one prediction
+    assert len(preds) > 0

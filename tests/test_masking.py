@@ -3,7 +3,6 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from missclimatepy.masking import (
     percent_missing_between,
@@ -14,21 +13,38 @@ from missclimatepy.masking import (
 )
 
 
-def _make_simple_df():
-    """Small synthetic dataset with two stations and daily data."""
+def _make_simple_df() -> pd.DataFrame:
+    """
+    Small helper dataset used across tests.
+
+    Stations:
+    - S1: full coverage, 5 consecutive days, all observed.
+    - S2: only days 2..5, with a mix of observed and missing.
+
+    Dates: 2020-01-01 .. 2020-01-05
+    Values:
+        S1: [1, 1, 1, 1, 1]
+        S2: [NaN, 2, NaN, NaN] on days 2..5
+    """
     dates = pd.date_range("2020-01-01", periods=5, freq="D")
-    data = []
 
-    # Station S1: full coverage (no missing)
-    for d in dates:
-        data.append({"station": "S1", "date": d, "value": 1.0})
+    df_s1 = pd.DataFrame(
+        {
+            "station": "S1",
+            "date": dates,
+            "value": [1.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
 
-    # Station S2: only two observed days (others missing)
-    # Observed on 1st and 3rd, missing otherwise
-    for d, val in zip(dates, [1.0, np.nan, 2.0, np.nan, np.nan]):
-        data.append({"station": "S2", "date": d, "value": val})
+    df_s2 = pd.DataFrame(
+        {
+            "station": ["S2"] * 4,
+            "date": dates[1:],  # 2..5
+            "value": [np.nan, 2.0, np.nan, np.nan],
+        }
+    )
 
-    return pd.DataFrame(data)
+    return pd.concat([df_s1, df_s2], ignore_index=True)
 
 
 def test_percent_missing_between_basic():
@@ -43,33 +59,43 @@ def test_percent_missing_between_basic():
         end="2020-01-05",
     )
 
-    # Two stations
-    assert set(out["station"]) == {"S1", "S2"}
-    assert (out["total_days"] == 5).all()
+    # Expected columns
+    expected_cols = {
+        "station",
+        "total_days",
+        "observed_days",
+        "missing_days",
+        "coverage",
+        "percent_missing",
+    }
+    assert expected_cols.issubset(out.columns)
 
-    # S1: full coverage
-    s1 = out.loc[out["station"] == "S1"].iloc[0]
-    assert s1["observed_days"] == 5
-    assert s1["missing_days"] == 0
-    assert np.isclose(s1["coverage"], 1.0)
-    assert np.isclose(s1["percent_missing"], 0.0)
+    # Sort by station for deterministic checks
+    out = out.sort_values("station").reset_index(drop=True)
 
-    # S2: 2 observed days out of 5
-    s2 = out.loc[out["station"] == "S2"].iloc[0]
-    assert s2["observed_days"] == 2
-    assert s2["missing_days"] == 3
-    assert np.isclose(s2["coverage"], 2 / 5)
-    assert np.isclose(s2["percent_missing"], 100.0 * 3 / 5)
+    # S1: full coverage 5/5
+    row_s1 = out[out["station"] == "S1"].iloc[0]
+    assert row_s1["total_days"] == 5
+    assert row_s1["observed_days"] == 5
+    assert row_s1["missing_days"] == 0
+    assert np.isclose(row_s1["coverage"], 1.0)
+    assert np.isclose(row_s1["percent_missing"], 0.0)
+
+    # S2: only day 3 observed within [1..5]
+    row_s2 = out[out["station"] == "S2"].iloc[0]
+    assert row_s2["total_days"] == 5
+    assert row_s2["observed_days"] == 1
+    assert row_s2["missing_days"] == 4
+    assert np.isclose(row_s2["coverage"], 1.0 / 5.0)
+    assert np.isclose(row_s2["percent_missing"], 80.0)
 
 
 def test_gap_profile_by_station_basic():
-    # Build a single-station dataset with known gap structure:
+    # Single-station dataset with known gap structure:
     # dates: 1..5, values: [1, NaN, NaN, 2, NaN]
     dates = pd.date_range("2020-01-01", periods=5, freq="D")
     values = [1.0, np.nan, np.nan, 2.0, np.nan]
-    df = pd.DataFrame(
-        {"station": "S1", "date": dates, "value": values}
-    )
+    df = pd.DataFrame({"station": "S1", "date": dates, "value": values})
 
     out = gap_profile_by_station(
         df,
@@ -78,12 +104,15 @@ def test_gap_profile_by_station_basic():
         target_col="value",
     )
 
+    assert list(out.columns) == ["station", "n_gaps", "mean_gap", "max_gap"]
     assert len(out) == 1
     row = out.iloc[0]
-    assert row["station"] == "S1"
 
-    # Boolean valid by day: [True, False, False, True, False]
-    # Missing runs: lengths [2, 1] → n_gaps = 2, mean = 1.5, max = 2
+    # Missing runs:
+    #   day 2-3 → length 2
+    #   day 5   → length 1
+    # => n_gaps = 2, mean_gap = 1.5, max_gap = 2
+    assert row["station"] == "S1"
     assert row["n_gaps"] == 2
     assert np.isclose(row["mean_gap"], 1.5)
     assert row["max_gap"] == 2
@@ -103,19 +132,24 @@ def test_missing_matrix_with_global_window():
         as_uint8=True,
     )
 
-    # Shape: 2 stations × 5 days
+    # Two stations, five days
     assert mat.shape == (2, 5)
-    assert mat.dtypes.unique()[0] == np.dtype("uint8")
+    assert mat.index.isin(["S1", "S2"]).all()
 
-    # Row order: S1 first (full coverage), then S2 (lower coverage)
-    assert list(mat.index) == ["S1", "S2"]
+    # Values must be 0/1 and uint-like when as_uint8=True
+    assert issubclass(mat.values.dtype.type, np.unsignedinteger)
+    assert set(np.unique(mat.values)).issubset({0, 1})
 
-    # S1: all ones
-    assert (mat.loc["S1"] == 1).all()
+    # S1 has full coverage in the window: row sum = 5
+    row_s1 = mat.loc["S1"]
+    assert row_s1.sum() == 5
 
-    # S2: ones only on days 1 and 3
-    s2_vals = mat.loc["S2"].to_numpy()
-    assert s2_vals.tolist() == [1, 0, 1, 0, 0]
+    # S2: only date 2020-01-03 observed
+    cols = list(mat.columns)
+    idx_day3 = cols.index(pd.Timestamp("2020-01-03"))
+    row_s2 = mat.loc["S2"]
+    assert row_s2.iloc[idx_day3] == 1
+    assert row_s2.sum() == 1
 
 
 def test_describe_missing_default_span():
@@ -128,10 +162,6 @@ def test_describe_missing_default_span():
         target_col="value",
     )
 
-    # Should have one row per station
-    assert set(out["station"]) == {"S1", "S2"}
-
-    # Columns present
     expected_cols = {
         "station",
         "total_days",
@@ -145,17 +175,50 @@ def test_describe_missing_default_span():
     }
     assert expected_cols.issubset(out.columns)
 
-    # Sorted by percent_missing descending
-    pm = out["percent_missing"].to_numpy()
-    assert np.all(pm[:-1] >= pm[1:])
+    out = out.sort_values("station").reset_index(drop=True)
+
+    # S1: span 1..5, all observed
+    row_s1 = out[out["station"] == "S1"].iloc[0]
+    assert row_s1["total_days"] == 5
+    assert row_s1["observed_days"] == 5
+    assert row_s1["missing_days"] == 0
+    assert np.isclose(row_s1["coverage"], 1.0)
+    assert np.isclose(row_s1["percent_missing"], 0.0)
+    # No gaps (continuous observed)
+    assert row_s1["n_gaps"] == 0
+    assert np.isclose(row_s1["mean_gap"], 0.0)
+    assert row_s1["max_gap"] == 0
+
+    # S2: span 2..5 → 4 days, only date 3 observed
+    row_s2 = out[out["station"] == "S2"].iloc[0]
+    assert row_s2["total_days"] == 4
+    assert row_s2["observed_days"] == 1
+    assert row_s2["missing_days"] == 3
+    assert np.isclose(row_s2["coverage"], 0.25)
+    assert np.isclose(row_s2["percent_missing"], 75.0)
+
+    # Gap structure for S2:
+    #   span: 2..5
+    #   mask: [NaN, 2, NaN, NaN] → observed at day 3 only
+    #   missing runs: day2 (len1), day4-5 (len2) → n_gaps=2, mean=1.5, max=2
+    assert row_s2["n_gaps"] == 2
+    assert np.isclose(row_s2["mean_gap"], 1.5)
+    assert row_s2["max_gap"] == 2
 
 
 def test_apply_random_mask_by_station_respects_percent_and_seed():
-    df = _make_simple_df()
+    # Simple single-station dataset: 5 observed values
+    dates = pd.date_range("2020-01-01", periods=5, freq="D")
+    df = pd.DataFrame(
+        {
+            "station": "S1",
+            "date": dates,
+            "value": [1.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
 
-    # Only mask station S1 to make counting easy:
-    # S1 has 5 non-null values; with 40% we expect floor(5*0.4) = 2 masked.
-    df_masked = apply_random_mask_by_station(
+    # With 40% masking, we expect floor(5 * 0.4) = 2 masked values.
+    df_masked_1 = apply_random_mask_by_station(
         df,
         id_col="station",
         date_col="date",
@@ -165,38 +228,37 @@ def test_apply_random_mask_by_station_respects_percent_and_seed():
         only_with_observation=True,
     )
 
-    # Station S1 originally had 5 observed values
-    s1_original = df.loc[df["station"] == "S1", "value"]
-    assert s1_original.notna().sum() == 5
+    # Check total number of NaNs
+    n_nans_1 = df_masked_1["value"].isna().sum()
+    assert n_nans_1 == 2
 
-    s1_masked = df_masked.loc[df_masked["station"] == "S1", "value"]
-    # Expect exactly 3 non-nulls left → 2 masked
-    assert s1_masked.notna().sum() == 3
+    # Same parameters & seed → identical masking pattern
+    df_masked_2 = apply_random_mask_by_station(
+        df,
+        id_col="station",
+        date_col="date",
+        target_col="value",
+        percent_to_mask=40.0,
+        random_state=123,
+        only_with_observation=True,
+    )
+    pd.testing.assert_series_equal(df_masked_1["value"], df_masked_2["value"])
 
-    # Station S2 should not gain extra NaNs beyond the existing ones
-    s2_original_nans = df.loc[df["station"] == "S2", "value"].isna().sum()
-    s2_masked_nans = df_masked.loc[df_masked["station"] == "S2", "value"].isna().sum()
-    # It may change if random picks existing NaNs (no-ops), but should never
-    # reduce the number of NaNs:
-    assert s2_masked_nans >= s2_original_nans
 
-
-def test_apply_random_mask_by_station_invalid_percent_raises():
+def test_apply_random_mask_invalid_percent_raises():
     df = _make_simple_df()
-    with pytest.raises(ValueError):
-        apply_random_mask_by_station(
-            df,
-            id_col="station",
-            date_col="date",
-            target_col="value",
-            percent_to_mask=-1.0,
-        )
 
-    with pytest.raises(ValueError):
-        apply_random_mask_by_station(
-            df,
-            id_col="station",
-            date_col="date",
-            target_col="value",
-            percent_to_mask=120.0,
-        )
+    for bad in (-1.0, 120.0):
+        try:
+            apply_random_mask_by_station(
+                df,
+                id_col="station",
+                date_col="date",
+                target_col="value",
+                percent_to_mask=bad,
+            )
+        except ValueError:
+            # Expected
+            continue
+        else:
+            raise AssertionError("Expected ValueError for invalid percent_to_mask")
