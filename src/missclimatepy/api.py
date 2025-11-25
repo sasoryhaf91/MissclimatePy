@@ -42,8 +42,9 @@ from typing import (
 import pandas as pd
 
 from .neighbors import build_neighbor_map
-from .evaluate import evaluate_stations, RFParams
+from .evaluate import evaluate_stations
 from .impute import impute_dataset
+from .models import RFParams
 
 from .viz import (
     plot_missing_matrix,
