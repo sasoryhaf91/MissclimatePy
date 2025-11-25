@@ -1,79 +1,221 @@
 # SPDX-License-Identifier: MIT
 """
-Core feature utilities for MissClimatePy.
+missclimatepy.features
+======================
 
-This module centralises small, reusable helpers for:
+Core feature-engineering helpers for MissClimatePy.
 
-- Ensuring a naive (timezone–free) datetime column.
-- Adding standard calendar features (year, month, day-of-year, optional
-  sin/cos transforms) to a dataframe.
-- Validating that required columns are present in an input dataframe.
-- Selecting station identifiers based on prefixes, explicit lists, regex
-  patterns, or custom predicates.
-- Filtering stations by a minimum number of observed (non-missing) target
-  values.
+This module centralizes small, reusable utilities to:
 
-These functions are intentionally lightweight and are reused across
-`evaluate`, `impute`, `masking`, and `viz`, so that column handling
-and feature construction remain consistent throughout the package.
+- Normalize datetime columns to timezone-free pandas datetimes.
+- Add calendar features (year, month, day-of-year) and optional cyclic encodings.
+- Build a consistent XYZT feature table for climate station data:
+  X = (lat, lon, alt, calendar_features), T = time, Z = target.
+- Validate required columns in user-provided DataFrames.
+- Select station identifiers with flexible filters (prefix, regex, etc.).
+- Filter station ids by a minimum number of observed rows.
+
+These helpers are used by both the evaluation and imputation routines and are
+kept generic so they can work with any long-format climate table where the
+caller provides column names.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, List, Sequence
+from typing import (
+    Callable,
+    Hashable,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 import pandas as pd
 
 
-# --------------------------------------------------------------------------- #
-# Basic column helpers
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Datetime utilities
+# ---------------------------------------------------------------------------
 
 
 def ensure_datetime_naive(s: pd.Series) -> pd.Series:
     """
-    Convert a Series to ``datetime64[ns]`` without timezone information.
+    Ensure that a Series is converted to timezone-free ``datetime64[ns]``.
 
-    The function is strict but robust:
-
-    - Values are parsed with :func:`pandas.to_datetime` using
-      ``errors="coerce"``, so unparsable entries become ``NaT``.
-    - If the resulting dtype is timezone-aware, the timezone is dropped via
-      ``.dt.tz_localize(None)``.
+    Steps
+    -----
+    1. Coerce values to datetime with ``errors='coerce'``.
+    2. If the resulting dtype is timezone-aware, drop the timezone.
 
     Parameters
     ----------
     s : Series
-        Input series (any dtype); typically a date column.
+        Input series with dates/timestamps.
 
     Returns
     -------
     Series
-        A ``datetime64[ns]`` series with no timezone information.
+        Datetime64[ns] series with no timezone information.
     """
-    out = pd.to_datetime(s, errors="coerce")
+    s = pd.to_datetime(s, errors="coerce")
+    # Avoid deprecated is_datetime64tz_dtype; inspect dtype instead
+    if isinstance(s.dtype, pd.DatetimeTZDtype):  # type: ignore[attr-defined]
+        s = s.dt.tz_localize(None)
+    return s
 
-    # Drop timezone if present (tz-aware -> naive)
-    # `.dt.tz` is None for naive series.
-    tz = getattr(out.dt, "tz", None)
-    if tz is not None:
-        out = out.dt.tz_localize(None)
+
+# ---------------------------------------------------------------------------
+# Calendar / cyclic features
+# ---------------------------------------------------------------------------
+
+
+def add_calendar_features(
+    df: pd.DataFrame,
+    date_col: str,
+    *,
+    add_cyclic: bool = False,
+    inplace: bool = False,
+) -> pd.DataFrame:
+    """
+    Add basic calendar features derived from ``date_col``:
+
+    - ``year``  (int32)
+    - ``month`` (int16)
+    - ``doy``   (day-of-year, int16)
+
+    Optionally, cyclic encodings of day-of-year are added:
+
+    - ``doy_sin``
+    - ``doy_cos``
+
+    Parameters
+    ----------
+    df : DataFrame
+        Input table.
+    date_col : str
+        Name of the date/datetime column.
+    add_cyclic : bool, default False
+        Whether to append sine/cosine encodings of day-of-year.
+    inplace : bool, default False
+        If True, mutate ``df`` in-place and return it. Otherwise, work
+        on a copy.
+
+    Returns
+    -------
+    DataFrame
+        Dataframe with added calendar (and optionally cyclic) columns.
+    """
+    out = df if inplace else df.copy()
+
+    out[date_col] = ensure_datetime_naive(out[date_col])
+    out = out.dropna(subset=[date_col])
+
+    out["year"] = out[date_col].dt.year.astype("int32", copy=False)
+    out["month"] = out[date_col].dt.month.astype("int16", copy=False)
+    out["doy"] = out[date_col].dt.dayofyear.astype("int16", copy=False)
+
+    if add_cyclic:
+        add_cyclic_doy(out, doy_col="doy", prefix="doy", inplace=True)
 
     return out
+
+
+def add_time_features(
+    df: pd.DataFrame,
+    date_col: str,
+    *,
+    add_cyclic: bool = False,
+    inplace: bool = False,
+) -> pd.DataFrame:
+    """
+    Backwards-compatible wrapper around :func:`add_calendar_features`.
+
+    Historically, MissClimatePy used the name ``add_time_features``. For
+    clarity, the new name is ``add_calendar_features``, but this function
+    is kept as a thin wrapper so existing code and tests still work.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Input table.
+    date_col : str
+        Name of the date/datetime column.
+    add_cyclic : bool, default False
+        Whether to append cyclic encodings of day-of-year.
+    inplace : bool, default False
+        If True, mutate ``df`` in-place.
+
+    Returns
+    -------
+    DataFrame
+        Same as :func:`add_calendar_features`.
+    """
+    return add_calendar_features(df, date_col, add_cyclic=add_cyclic, inplace=inplace)
+
+
+def add_cyclic_doy(
+    df: pd.DataFrame,
+    *,
+    doy_col: str = "doy",
+    prefix: str = "doy",
+    inplace: bool = False,
+) -> pd.DataFrame:
+    """
+    Add sine/cosine cyclic encodings for a day-of-year column.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Input table which must contain ``doy_col``.
+    doy_col : str, default "doy"
+        Name of the column containing the day-of-year (1..366).
+    prefix : str, default "doy"
+        Prefix for the new columns, resulting in f"{prefix}_sin" and
+        f"{prefix}_cos".
+    inplace : bool, default False
+        If True, mutate ``df`` in-place. Otherwise work on a copy.
+
+    Returns
+    -------
+    DataFrame
+        Dataframe with two new columns: ``f"{prefix}_sin"`` and
+        ``f"{prefix}_cos"``.
+    """
+    out = df if inplace else df.copy()
+
+    if doy_col not in out.columns:
+        raise ValueError(f"Column '{doy_col}' not found for cyclic encoding.")
+
+    doy_values = pd.to_numeric(out[doy_col], errors="coerce").to_numpy()
+    # Use 365.25 to keep leap years approximately consistent
+    two_pi = 2.0 * np.pi
+    phase = two_pi * doy_values / 365.25
+
+    sin_name = f"{prefix}_sin"
+    cos_name = f"{prefix}_cos"
+
+    out[sin_name] = np.sin(phase)
+    out[cos_name] = np.cos(phase)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Validation helper
+# ---------------------------------------------------------------------------
 
 
 def validate_required_columns(
     df: pd.DataFrame,
     required: Sequence[str],
-    *,
-    context: str | None = None,
+    context: Optional[str] = None,
 ) -> None:
     """
-    Raise a :class:`ValueError` if any of the requested columns is missing.
-
-    This helper is used early in most public functions to provide clearer
-    error messages to end users.
+    Raise a ValueError if any required columns are missing.
 
     Parameters
     ----------
@@ -81,184 +223,254 @@ def validate_required_columns(
         Input table.
     required : sequence of str
         Column names that must be present.
-    context : str, optional
-        Optional short label indicating which function is performing
-        the validation. This is only used in the error message.
-
-    Raises
-    ------
-    ValueError
-        If at least one required column is missing.
+    context : str or None, default None
+        Optional string to prepend to the error message (e.g., the
+        calling function name).
     """
     missing = [c for c in required if c not in df.columns]
     if not missing:
         return
 
     prefix = f"[{context}] " if context else ""
-    available_preview = list(df.columns[:12])
     raise ValueError(
-        f"{prefix}Missing required columns: {missing}. "
-        f"Available columns include: {available_preview}..."
+        f"{prefix}missing required columns {missing}. "
+        f"Available columns include: {list(df.columns)[:12]}..."
     )
 
 
-# --------------------------------------------------------------------------- #
-# Calendar features
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Build XYZT-ready feature table
+# ---------------------------------------------------------------------------
 
 
-def add_time_features(
-    df: pd.DataFrame,
+def build_xyzt_features(
+    data: pd.DataFrame,
     *,
+    id_col: str,
     date_col: str,
+    lat_col: str,
+    lon_col: str,
+    alt_col: str,
+    target_col: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
     add_cyclic: bool = False,
-) -> pd.DataFrame:
+    feature_cols: Optional[Sequence[str]] = None,
+) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Add standard calendar features derived from a date column.
+    Prepare a long-format climate table for XYZT modelling.
 
-    The following columns are added:
-
-    - ``year``  : calendar year (int32)
-    - ``month`` : calendar month (1–12, int16)
-    - ``doy``   : day-of-year (1–366, int16)
-
-    If ``add_cyclic=True``, two additional columns are added:
-
-    - ``doy_sin`` : sine transform of day-of-year on a 365.25-day cycle,
-    - ``doy_cos`` : cosine transform of day-of-year on a 365.25-day cycle.
+    Steps
+    -----
+    1. Validate core columns.
+    2. Normalize ``date_col`` to naive datetimes and optionally clip to
+       ``[start, end]``.
+    3. Add calendar features (year, month, doy, optional cyclic).
+    4. Determine the list of feature columns to be used by models.
 
     Parameters
     ----------
-    df : DataFrame
-        Input table containing at least ``date_col``.
-    date_col : str
-        Name of the column with date information.
+    data : DataFrame
+        Input table with at least the columns specified below.
+    id_col, date_col, lat_col, lon_col, alt_col, target_col : str
+        Column names for station id, datetime, latitude, longitude,
+        altitude, and the target variable.
+    start, end : str or None, default None
+        Optional inclusive boundaries to clip the analysis period.
     add_cyclic : bool, default False
-        Whether to add cyclic (sin/cos) encodings of the day-of-year.
+        Whether to include cyclic encodings of day-of-year.
+    feature_cols : sequence of str or None, default None
+        Explicit list of feature columns. If None, the default set is:
+
+        - [lat_col, lon_col, alt_col, "year", "month", "doy"]
+        - plus ["doy_sin", "doy_cos"] if ``add_cyclic=True``.
 
     Returns
     -------
-    DataFrame
-        A *copy* of the input dataframe with the additional columns.
+    prepared_df : DataFrame
+        Dataframe containing at least:
+
+        - id_col, date_col, lat_col, lon_col, alt_col, target_col
+        - all chosen feature columns.
+
+        The function does **not** drop rows with missing features or
+        target; downstream routines decide how to handle them.
+    features_list : list of str
+        Names of feature columns actually used.
     """
-    validate_required_columns(df, [date_col], context="add_time_features")
+    validate_required_columns(
+        data,
+        [id_col, date_col, lat_col, lon_col, alt_col, target_col],
+        context="build_xyzt_features",
+    )
 
-    out = df.copy()
-    out[date_col] = ensure_datetime_naive(out[date_col])
+    df = data.copy()
 
-    # Basic calendar fields
-    out["year"] = out[date_col].dt.year.astype("int32", copy=False)
-    out["month"] = out[date_col].dt.month.astype("int16", copy=False)
-    out["doy"] = out[date_col].dt.dayofyear.astype("int16", copy=False)
+    # Normalize and clip dates
+    df[date_col] = ensure_datetime_naive(df[date_col])
+    df = df.dropna(subset=[date_col])
 
-    if add_cyclic:
-        two_pi = 2.0 * np.pi
-        doy_arr = out["doy"].to_numpy(dtype=float)
-        out["doy_sin"] = np.sin(two_pi * doy_arr / 365.25)
-        out["doy_cos"] = np.cos(two_pi * doy_arr / 365.25)
+    if start is not None or end is not None:
+        lo = pd.to_datetime(start) if start is not None else df[date_col].min()
+        hi = pd.to_datetime(end) if end is not None else df[date_col].max()
+        df = df[(df[date_col] >= lo) & (df[date_col] <= hi)]
 
-    return out
+    # Add calendar features in-place
+    df = add_calendar_features(df, date_col=date_col, add_cyclic=add_cyclic, inplace=True)
+
+    # Decide which feature columns to use
+    if feature_cols is None:
+        feats: List[str] = [lat_col, lon_col, alt_col, "year", "month", "doy"]
+        if add_cyclic:
+            feats += ["doy_sin", "doy_cos"]
+    else:
+        feats = list(feature_cols)
+
+    # Ensure we keep the minimal set of columns needed by downstream code
+    keep = sorted(
+        set([id_col, date_col, lat_col, lon_col, alt_col, target_col] + feats)
+    )
+    df = df[keep]
+
+    return df, feats
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 # Station selection helpers
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
 
 def select_station_ids(
-    df: pd.DataFrame,
+    obj: Union[pd.DataFrame, Sequence[Hashable]],
     *,
-    id_col: str,
-    prefix: str | Iterable[str] | None = None,
-    station_ids: Iterable[object] | None = None,
-    regex: str | None = None,
-    custom_filter: Callable[[object], bool] | None = None,
-) -> List[object]:
+    id_col: Optional[str] = None,
+    prefix: Optional[Iterable[str]] = None,
+    station_ids: Optional[Iterable[Hashable]] = None,
+    regex: Optional[str] = None,
+    custom_filter: Optional[Callable[[Hashable], bool]] = None,
+) -> List[Hashable]:
     """
-    Select station identifiers using flexible filters (OR semantics).
+    Select a subset of station identifiers using flexible filters.
 
-    The underlying order is the natural order of first appearance in the
-    dataframe. When multiple filters are provided, the union of all matches
-    is returned, with duplicates removed while preserving this order.
+    This function supports two calling styles:
+
+    1) Passing a DataFrame + ``id_col``::
+
+        select_station_ids(df, id_col="station", prefix="15")
+
+    2) Passing an explicit sequence of ids::
+
+        ids = ["15001", "15002", "32001"]
+        select_station_ids(ids, prefix="15")
+
+    Filters are combined with **OR** semantics:
+
+    - Any id matching a given prefix is included.
+    - Any id explicitly listed in ``station_ids`` is included.
+    - Any id matching the regular expression is included.
+    - Any id for which ``custom_filter(id)`` is True is included.
+
+    If no filters are provided, all ids are returned.
+    If filters are provided but none of them matches any id, the function
+    falls back to returning **all** ids (useful for MDR-like experiments).
 
     Parameters
     ----------
-    df : DataFrame
-        Input table containing at least ``id_col``.
-    id_col : str
-        Column with station identifiers.
-    prefix : str or iterable of str, optional
-        One or several prefixes. A station is selected if its string
-        representation ``str(station_id)`` starts with *any* of these.
-    station_ids : iterable, optional
-        Explicit list of station identifiers to include.
-    regex : str, optional
-        Regular expression pattern applied to ``str(station_id)``.
-    custom_filter : callable, optional
-        Function ``f(station_id) -> bool``. Stations for which this function
-        returns True are included.
+    obj : DataFrame or sequence
+        Either a DataFrame containing the station id column or a sequence
+        of station identifiers.
+    id_col : str or None, default None
+        Name of the station id column when ``obj`` is a DataFrame.
+    prefix : iterable of str or None, default None
+        One or more prefixes; ids whose string representation starts with any of
+        these prefixes will be selected.
+    station_ids : iterable or None, default None
+        Explicit list of ids to include (intersected with the ids present in
+        ``obj`` when a DataFrame is used).
+    regex : str or None, default None
+        Regular expression; ids whose string representation matches the pattern
+        will be included.
+    custom_filter : callable or None, default None
+        Function ``f(id) -> bool``. If provided, any id for which the function
+        returns True will be included.
 
     Returns
     -------
     list
-        Selected station identifiers. If no filters are provided, all unique
-        stations in the dataframe are returned.
+        List of selected ids, without duplicates, preserving the order in
+        the original sequence.
     """
-    validate_required_columns(df, [id_col], context="select_station_ids")
+    # Determine the base list of ids
+    if isinstance(obj, pd.DataFrame):
+        if id_col is None:
+            raise ValueError(
+                "select_station_ids: 'id_col' must be provided when passing a DataFrame."
+            )
+        if id_col not in obj.columns:
+            raise ValueError(
+                f"select_station_ids: column '{id_col}' not found in DataFrame."
+            )
+        all_ids: List[Hashable] = list(pd.unique(obj[id_col].dropna()))
+    else:
+        all_ids = list(obj)
 
-    all_ids = df[id_col].dropna().unique().tolist()
-    chosen: List[object] = []
-
-    # If no filters at all, return all unique ids
+    # No filters → return everything
     if prefix is None and station_ids is None and regex is None and custom_filter is None:
-        return all_ids
+        return list(all_ids)
 
-    # Prefix filter
-    if prefix is not None:
-        if isinstance(prefix, str):
-            prefixes = [prefix]
-        else:
-            prefixes = list(prefix)
-        for sid in all_ids:
-            s = str(sid)
-            if any(s.startswith(p) for p in prefixes):
-                chosen.append(sid)
+    # Normalize prefixes
+    if prefix is not None and isinstance(prefix, str):
+        prefix_iter: Optional[List[str]] = [prefix]
+    else:
+        prefix_iter = list(prefix) if prefix is not None else None
 
-    # Explicit station ids
-    if station_ids is not None:
-        for sid in station_ids:
-            chosen.append(sid)
-
-    # Regex filter
+    # Pre-compile regex if needed
+    pat = None
     if regex is not None:
         import re
 
         pat = re.compile(regex)
-        for sid in all_ids:
-            if pat.match(str(sid)):
-                chosen.append(sid)
 
-    # Custom predicate
-    if custom_filter is not None:
-        for sid in all_ids:
-            try:
-                if custom_filter(sid):
-                    chosen.append(sid)
-            except Exception:
-                # Be lenient: ignore errors in user-supplied predicate
-                continue
+    selected: List[Hashable] = []
 
-    # Deduplicate while preserving order and restricting to existing ids
+    for sid in all_ids:
+        s = str(sid)
+        keep = False
+
+        if prefix_iter is not None:
+            if any(s.startswith(str(p)) for p in prefix_iter):
+                keep = True
+
+        if station_ids is not None and not keep:
+            # Only consider ids that exist in the base list
+            if sid in station_ids:
+                keep = True
+
+        if pat is not None and not keep:
+            if pat.match(s):
+                keep = True
+
+        if custom_filter is not None and not keep:
+            if custom_filter(sid):
+                keep = True
+
+        if keep:
+            selected.append(sid)
+
+    # Fallback: if no id matched, return all ids
+    if not selected:
+        selected = list(all_ids)
+
+    # Deduplicate preserving order
     seen = set()
-    result: List[object] = []
-    existing = set(all_ids)
-    for sid in chosen:
-        if sid in existing and sid not in seen:
-            seen.add(sid)
-            result.append(sid)
+    out: List[Hashable] = []
+    for sid in selected:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(sid)
 
-    # If filters yielded nothing, fall back to all_ids
-    return result or all_ids
+    return out
 
 
 def filter_by_min_station_rows(
@@ -267,27 +479,33 @@ def filter_by_min_station_rows(
     id_col: str,
     target_col: str,
     min_station_rows: int,
-) -> List[object]:
+    station_ids: Optional[Iterable[Hashable]] = None,
+) -> List[Hashable]:
     """
-    Return station IDs that have at least a minimum number of observations.
+    Filter station ids by a minimum number of **observed** target rows.
 
-    Only **non-missing** values of ``target_col`` are counted.
+    This helper is meant to be used in MDR-like experiments to ensure that
+    only stations with enough non-missing data are evaluated.
 
     Parameters
     ----------
     df : DataFrame
-        Input table.
+        Long-format table containing at least ``id_col`` and ``target_col``.
     id_col : str
         Station identifier column.
     target_col : str
-        Target variable whose non-null counts are used.
+        Target variable column. Only non-null values are counted.
     min_station_rows : int
-        Minimum required number of non-null observations.
+        Minimum number of non-null target rows required for a station to be
+        kept.
+    station_ids : iterable or None, default None
+        Optional subset of station ids to filter. If None, all unique ids
+        in ``df[id_col]`` are considered.
 
     Returns
     -------
     list
-        Station identifiers that satisfy the threshold.
+        Station ids that meet or exceed the required number of observed rows.
     """
     validate_required_columns(
         df,
@@ -295,25 +513,36 @@ def filter_by_min_station_rows(
         context="filter_by_min_station_rows",
     )
 
-    if min_station_rows <= 0:
-        # Trivial case: all stations qualify
-        return df[id_col].dropna().unique().tolist()
+    if station_ids is None:
+        candidate_ids = df[id_col].dropna().unique().tolist()
+    else:
+        candidate_ids = list(station_ids)
 
-    counts = (
+    # Count observed (non-NaN) target values per station
+    obs_counts = (
         df.loc[~df[target_col].isna(), [id_col, target_col]]
         .groupby(id_col)[target_col]
         .size()
         .astype(int)
     )
 
-    ok = counts[counts >= int(min_station_rows)]
-    return ok.index.tolist()
+    keep: List[Hashable] = []
+    threshold = int(min_station_rows)
+
+    for sid in candidate_ids:
+        if int(obs_counts.get(sid, 0)) >= threshold:
+            keep.append(sid)
+
+    return keep
 
 
 __all__ = [
     "ensure_datetime_naive",
-    "validate_required_columns",
+    "add_calendar_features",
     "add_time_features",
+    "add_cyclic_doy",
+    "build_xyzt_features",
+    "validate_required_columns",
     "select_station_ids",
     "filter_by_min_station_rows",
 ]

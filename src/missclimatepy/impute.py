@@ -3,500 +3,183 @@
 missclimatepy.impute
 ====================
 
-Local XYZT-style imputation for a single target variable.
+Spatial–temporal imputation of daily climate station records using XYZT
+features:
 
-This module implements a *minimal* yet expressive imputation engine for
-long-format daily climate records. The core philosophy is:
+    X = (lat, lon, alt, calendar features)
 
-- Use **only** space–time coordinates as predictors:
-  - Spatial: latitude, longitude, altitude  → (x, y, z)
-  - Temporal: calendar features derived from the date  → (t)
-- Train a **local model per station**, using:
-  - Neighboring stations in space (K-nearest or a user-provided map), and
-  - An optional fraction of the target station’s own observed history.
+This module provides a single high-level function:
 
-The goal is to reconstruct complete daily series for each selected station
-over a given time window, while remaining independent of internal covariates
-that are often also missing in practice.
+- :func:`impute_dataset` – fills missing values in a long-format station × date
+  table using a configurable regression model trained on:
 
-Key ideas
----------
+    - Spatial coordinates (latitude, longitude, altitude), and
+    - Calendar-derived features (year, month, day-of-year, optional cyclic
+      sin/cos of day-of-year).
 
-- **Schema-agnostic**: You provide column names for id, date, coordinates and
-  target; the function works with any naming convention.
+Design goals
+------------
 
-- **Local models**: For each station, a model is trained from:
-  - either its K nearest neighbors (based on haversine distance in (lat, lon)),
-  - or *all other* stations when ``k_neighbors=None``,
-  - plus an optional fraction of the station’s own observed rows.
+- No dependence on internal covariates that are often missing themselves:
+  only station metadata + calendar structure.
+- Reuse the same XYZT feature design and model factory (:func:`make_model`)
+  as :mod:`missclimatepy.evaluate`.
+- Flexible configuration:
 
-- **XYZT features only**:
-  - Coordinates: ``lat_col``, ``lon_col``, ``alt_col``.
-  - Calendar: ``year``, ``month``, ``doy`` (and optionally ``doy_sin``,
-    ``doy_cos`` when ``add_cyclic=True``).
+  * Choice of model via ``model_kind`` and ``model_params``.
+  * Optional K-nearest-neighbor restriction via ``k_neighbors`` or
+    a precomputed ``neighbor_map``.
+  * Station filters (prefix, explicit ids, regex, custom predicate).
+  * Minimum number of observed rows per station (``min_station_rows``).
+  * Control over the fraction of the target station's valid rows that enter
+    training (``include_target_pct``).
 
-- **Model-agnostic**: Any regressor supported by :mod:`missclimatepy.models`
-  can be used via ``model_kind`` and ``model_params`` (e.g., ``"rf"` for
-  Random Forest, ``"etr"`` for Extra Trees, ``"linreg"`` for linear
-  regression, etc.), as long as it accepts a 2D array of XYZT features.
+Output
+------
 
-- **Minimal tidy output**: The returned table always has exactly:
+The function returns a copy of the input dataframe (possibly clipped to a
+date window) with:
 
-    ``[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"]``
+- The target column ``target_col`` where missing values have been filled
+  whenever possible.
+- An additional column ``source_col`` (default "source") with values:
 
-  where ``source ∈ {"observed", "imputed"}``.
+  - "observed" – original non-NaN values from the input table.
+  - "imputed" – values predicted by the model where the original target
+    was NaN and features were valid.
+  - "missing" – rows where the target remains NaN because no model was
+    trained or features were incomplete.
 
-Station eligibility (min_station_rows)
---------------------------------------
+Example
+-------
 
-A station is imputed only if the number of **observed (non-NaN) target rows**
-within the analysis window [start, end] is at least ``min_station_rows``
-(when this parameter is provided and > 0). If ``min_station_rows`` is
-``None`` or 0, *no minimum* is enforced and all selected stations are
-eligible.
-
-Information visibility (include_target_pct)
--------------------------------------------
-
-For each eligible station, the fraction of its **own observed rows** that is
-used in the training set is controlled by ``include_target_pct``:
-
-- ``include_target_pct is None or >= 100``:
-    All observed rows of the station are allowed into the training set
-    (full inclusion, original behavior).
-
-- ``0 < include_target_pct < 100``:
-    Only that percentage (floored) of the station's observed rows is
-    randomly selected (without replacement) and added to the training set.
-    The selection is done with a reproducible RNG controlled by
-    ``include_target_seed``. The remaining observed rows are kept in the
-    output as ``source="observed"``, but are *not* seen by the model.
-
-- ``include_target_pct == 0``:
-    No local rows are used in training (extreme LOSO-like scenario);
-    imputation is driven solely by neighboring stations (when available).
-
-Note that this is **not** a train/test split for evaluation – it only
-controls how much the local history is exposed to the model during
-imputation. For proper validation, use :func:`missclimatepy.evaluate.evaluate_stations`.
-
-Persistence
------------
-
-Results can be saved automatically using:
-
-- ``save_path``: destination path (CSV or Parquet).
-- ``save_format``: ``"csv"``, ``"parquet"`` or ``"auto"`` (infer from suffix).
-- ``save_index``: whether to write the index.
-- ``save_partitions``: if True, write **one file per station**.
-
-Examples
---------
-
+>>> import pandas as pd
 >>> from missclimatepy.impute import impute_dataset
+>>>
+>>> df = pd.DataFrame({
+...     "station": ["S1"] * 4 + ["S2"] * 4,
+...     "date": pd.date_range("2020-01-01", periods=4, freq="D").tolist() * 2,
+...     "latitude": [10.0] * 4 + [11.0] * 4,
+...     "longitude": [-100.0] * 4 + [-101.0] * 4,
+...     "altitude": [2000.0] * 8,
+...     "tmin": [1.0, 2.0, None, 4.0, 0.5, None, 1.5, 2.0],
+... })
+>>>
 >>> out = impute_dataset(
-...     data=df,
+...     df,
 ...     id_col="station",
 ...     date_col="date",
-...     lat_col="lat",
-...     lon_col="lon",
-...     alt_col="alt",
+...     lat_col="latitude",
+...     lon_col="longitude",
+...     alt_col="altitude",
 ...     target_col="tmin",
-...     start="1981-01-01",
-...     end="2023-12-31",
-...     k_neighbors=20,
 ...     model_kind="rf",
-...     model_params={"n_estimators": 300, "max_depth": 30, "n_jobs": -1, "random_state": 42},
-...     min_station_rows=365,
-...     include_target_pct=50.0,
-...     include_target_seed=42,
-...     show_progress=True,
-...     save_path="outputs/tmin_imputed.parquet",
-...     save_format="auto",
-...     save_partitions=False,
+...     model_params={"n_estimators": 50, "random_state": 42},
 ... )
->>> out.columns.tolist()
-['station', 'date', 'latitude', 'longitude', 'altitude', 'tmin', 'source']
+>>> out[["station", "date", "tmin", "source"]].head()
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Union, Literal
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
-from .features import (
-    validate_required_columns,
-    ensure_datetime_naive,
-    add_calendar_features,
-    default_feature_names,
-)
-from .neighbors import build_neighbor_map
-from .models import make_model
-
 try:  # optional progress bar
-    from tqdm.auto import tqdm
+    from tqdm.auto import tqdm  # type: ignore[import]
 except Exception:  # pragma: no cover
-
     def tqdm(x, **kwargs):
-        return x  # transparent iterator
+        return x  # fallback: transparent iterator
+
+from .features import (
+    ensure_datetime_naive,
+    add_time_features,
+    validate_required_columns,
+)
+from .models import make_model
+from .neighbors import build_neighbor_map
 
 
-# ---------------------------------------------------------------------------
-# Internal: persistence helpers
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Internal helpers
+# --------------------------------------------------------------------------- #
 
 
-def _infer_format_from_path(path: str) -> Literal["csv", "parquet"]:
-    """
-    Infer file format from the output path extension.
-
-    - ``*.parquet``           → ``"parquet"``
-    - ``*.csv[.gz|.bz2|...]`` → ``"csv"``
-    - otherwise               → ``"csv"`` (conservative default)
-    """
-    p = path.lower()
-    if p.endswith(".parquet"):
-        return "parquet"
-    if (
-        p.endswith(".csv")
-        or p.endswith(".csv.gz")
-        or p.endswith(".csv.bz2")
-        or p.endswith(".csv.xz")
-        or p.endswith(".csv.zip")
-    ):
-        return "csv"
-    return "csv"
-
-
-def _ensure_parent_dir(path: Path) -> None:
-    """
-    Create parent directories for ``path`` if they do not exist.
-    """
-    parent = path.parent
-    if parent and not parent.exists():
-        parent.mkdir(parents=True, exist_ok=True)
-
-
-def _write_csv(df: pd.DataFrame, dest: Path, *, index: bool) -> None:
-    """
-    Write a DataFrame to CSV (compression inferred from suffix).
-    """
-    _ensure_parent_dir(dest)
-    df.to_csv(dest, index=index)
-
-
-def _write_parquet(df: pd.DataFrame, dest: Path, *, index: bool) -> None:
-    """
-    Write a DataFrame to Parquet.
-    """
-    _ensure_parent_dir(dest)
-    df.to_parquet(dest, index=index)
-
-
-def _write_partitions(
-    df: pd.DataFrame,
-    *,
-    station_col: str,
-    base_path: Path,
-    fmt: Literal["csv", "parquet"],
-    index: bool,
-) -> None:
-    """
-    Write one file (CSV/Parquet) per station.
-
-    - Parquet: ``base_path / f"station=<sid>/part.parquet"`` (Hive-like layout).
-    - CSV:     ``base_name + "_station=<sid>.csv[.gz]"`` per station.
-    """
-    if fmt == "parquet":
-        # Partitioned folders: base/station=<sid>/part.parquet
-        for sid, sdf in df.groupby(station_col, sort=False):
-            part_dir = base_path / f"station={sid}"
-            _ensure_parent_dir(part_dir / "part.parquet")
-            sdf.to_parquet(part_dir / "part.parquet", index=index)
-    else:
-        # CSV per station with suffix
-        base = str(base_path)
-        for sid, sdf in df.groupby(station_col, sort=False):
-            lower = base.lower()
-            if lower.endswith(".csv"):
-                out_name = base[:-4] + f"_station={sid}.csv"
-            elif any(lower.endswith(ext) for ext in (".csv.gz", ".csv.bz2", ".csv.xz", ".csv.zip")):
-                # split at ".csv" and keep the rest (e.g., ".gz")
-                pos = lower.rfind(".csv")
-                out_name = base[:pos] + f"_station={sid}" + base[pos:]
-            else:
-                # no extension -> add .csv
-                out_name = base + f"_station={sid}.csv"
-            dest = Path(out_name)
-            _ensure_parent_dir(dest)
-            sdf.to_csv(dest, index=index)
-
-
-def _save_result_df(
-    df: pd.DataFrame,
-    *,
-    path: Optional[str],
-    fmt: Literal["csv", "parquet", "auto"],
-    index: bool,
-    partition: bool,
-    station_col: str,
-) -> None:
-    """
-    Save the imputed DataFrame if ``path`` is provided. No-op if ``path`` is None.
-
-    This helper:
-
-    - infers format if ``fmt="auto"``,
-    - validates a minimal schema,
-    - writes a single file or one file per station.
-    """
-    if path is None:
-        return
-
-    base = Path(path)
-    if fmt == "auto":
-        fmt_resolved = _infer_format_from_path(str(base))
-    else:
-        fmt_resolved = fmt
-
-    if fmt_resolved not in ("csv", "parquet"):
-        raise ValueError(
-            f"Unsupported save_format '{fmt}'. Use 'csv', 'parquet', or 'auto'."
-        )
-
-    # Minimal schema: station id, date, coordinates and source flag
-    required = {station_col, "date", "latitude", "longitude", "altitude", "source"}
-    if not required.issubset(df.columns):
-        raise ValueError(
-            "Result schema missing required columns for saving. "
-            f"Expected to include: {sorted(required)}; got: {list(df.columns)[:10]}..."
-        )
-
-    if partition:
-        _write_partitions(
-            df,
-            station_col=station_col,
-            base_path=base,
-            fmt=fmt_resolved,
-            index=index,
-        )
-        return
-
-    if fmt_resolved == "parquet":
-        _write_parquet(df, base, index=index)
-    else:
-        _write_csv(df, base, index=index)
-
-
-# ---------------------------------------------------------------------------
-# Public imputation API
-# ---------------------------------------------------------------------------
-
-
-def impute_dataset(
+def _prepare_xyzt(
     data: pd.DataFrame,
     *,
-    # schema
     id_col: str,
     date_col: str,
     lat_col: str,
     lon_col: str,
     alt_col: str,
     target_col: str,
-    # temporal window
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    # features (calendar)
-    add_cyclic: bool = False,
-    # station selection (optional, OR semantics)
-    prefix: Optional[Iterable[str]] = None,
-    station_ids: Optional[Iterable[Union[str, int]]] = None,
-    regex: Optional[str] = None,
-    custom_filter: Optional[Callable[[Union[str, int]], bool]] = None,
-    # neighbors
-    k_neighbors: Optional[int] = 20,
-    neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]] = None,
-    # minimum observed rows within the window
-    min_station_rows: Optional[int] = None,
-    # local history visibility
-    include_target_pct: Optional[float] = None,
-    include_target_seed: int = 42,
-    # model (generic XYZT regressor)
-    model_kind: str = "rf",
-    model_params: Optional[Mapping[str, Any]] = None,
-    # logging
-    show_progress: bool = False,
-    # persistence
-    save_path: Optional[str] = None,
-    save_format: Literal["csv", "parquet", "auto"] = "auto",
-    save_index: bool = False,
-    save_partitions: bool = False,
-) -> pd.DataFrame:
+    start: Optional[str],
+    end: Optional[str],
+    add_cyclic: bool,
+    feature_cols: Optional[Sequence[str]],
+) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Impute a single target variable over a daily window using local XYZT models.
+    Preprocess once:
 
-    This function trains one model *per station* and returns a minimal long-format
-    DataFrame containing both observed and imputed values over the requested
-    [start, end] interval. Only space–time coordinates (x, y, z, t) are used as
-    predictors.
-
-    Parameters
-    ----------
-    data : DataFrame
-        Long-format input with at least:
-
-        ``[id_col, date_col, lat_col, lon_col, alt_col, target_col]``.
-
-        The target column may contain NaNs (gaps) to be imputed.
-    id_col, date_col, lat_col, lon_col, alt_col, target_col : str
-        Column names for station id, timestamp, spatial coordinates and target.
-    start, end : str or None
-        Inclusive analysis window. If None, inferred from the data span.
-    add_cyclic : bool, optional
-        If True, adds harmonic day-of-year terms (``doy_sin``, ``doy_cos``) to
-        the feature set.
-    prefix, station_ids, regex, custom_filter :
-        Optional filters to select which stations to process (OR semantics):
-
-        - ``prefix``: string or iterable of strings; keep stations whose id
-          starts with any of these prefixes.
-        - ``station_ids``: explicit list of station ids to include.
-        - ``regex``: regular expression that station ids must match.
-        - ``custom_filter``: callable ``f(id) -> bool``.
-          If no filters are provided, *all* stations in ``data`` are considered.
-    k_neighbors : int or None, default 20
-        If provided and ``neighbor_map`` is None, builds a KNN haversine
-        neighbor map using station coordinates and trains each station’s model
-        with those neighbors (excluding the target). If None, all other
-        stations are used as the spatial pool.
-    neighbor_map : dict or None
-        Overrides ``k_neighbors``. Mapping
-        ``{station_id -> list_of_neighbor_ids}`` used directly.
-    min_station_rows : int or None
-        Minimum number of **observed** target rows within [start, end] required
-        for a station to be imputed. If None or 0, no minimum is enforced.
-
-    include_target_pct : float in [0, 100] or None
-        Fraction of each station's **observed** target rows allowed into the
-        training set. Values ≥ 100 or None correspond to full inclusion.
-        When 0, the model never sees the target station’s history (LOSO-like).
-    include_target_seed : int
-        Seed for the random sampling of local rows when
-        ``0 < include_target_pct < 100``.
-
-    model_kind : str, default "rf"
-        Name of the model family to use. The available options and default
-        hyperparameters are defined in :mod:`missclimatepy.models`.
-        Examples include ``"rf"`` (Random Forest), ``"etr"`` (Extra Trees),
-        ``"gbrt"``, ``"hgbt"``, ``"knn"``, ``"mlp"``, ``"svr"``,
-        ``"linreg"``, ``"elasticnet"``, and others.
-    model_params : mapping or None
-        Dictionary of hyperparameters for the chosen model. Any missing keys
-        fall back to the model-specific defaults.
-
-    show_progress : bool
-        If True, prints per-station progress lines using ``tqdm`` when
-        available.
-    save_path : str or None
-        If provided, the resulting DataFrame is written to this path:
-
-        - If ``save_format="auto"``, the format is inferred from the suffix:
-          ``*.parquet`` → Parquet; ``*.csv[.gz|...]`` → CSV.
-        - Parent directories are created as needed.
-    save_format : {"csv","parquet","auto"}
-        File format for saving. Use "auto" to infer from the extension.
-    save_index : bool
-        Whether to write the DataFrame index to disk.
-    save_partitions : bool
-        If True, write **one file per station**:
-
-        - Parquet: ``base_dir / "station=<ID>/part.parquet"``
-        - CSV: ``base_name + "_station=<ID>.csv[.gz]"``
+    - Ensure naive datetime in ``date_col``.
+    - Optionally clip to [start, end].
+    - Add calendar features (year, month, doy, optional sin/cos).
+    - Decide the list of feature columns to use.
 
     Returns
     -------
-    DataFrame
-        Minimal long-format table with **exactly** the columns:
-
-        ``[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"]``
-
-        where:
-
-        - ``source = "observed"`` for original non-missing values, and
-        - ``source = "imputed"`` for values filled by the model.
+    df : DataFrame
+        Preprocessed view containing at least id/date/coords/target/features.
+    feats : list[str]
+        Names of feature columns used for modelling.
     """
-    # ------------------------------------------------------------------
-    # 1) Basic validation & time window
-    # ------------------------------------------------------------------
-    validate_required_columns(
-        data,
-        [id_col, date_col, lat_col, lon_col, alt_col, target_col],
-    )
-
     df = data.copy()
     df[date_col] = ensure_datetime_naive(df[date_col])
     df = df.dropna(subset=[date_col])
 
-    if df.empty:
-        # Empty scaffold with canonical output columns
-        empty = pd.DataFrame(
-            columns=[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"]
-        )
-        _save_result_df(
-            empty,
-            path=save_path,
-            fmt=save_format,
-            index=save_index,
-            partition=save_partitions,
-            station_col=id_col,
-        )
-        return empty
+    if start or end:
+        lo = pd.to_datetime(start) if start else df[date_col].min()
+        hi = pd.to_datetime(end) if end else df[date_col].max()
+        df = df[(df[date_col] >= lo) & (df[date_col] <= hi)]
 
-    lo = pd.to_datetime(start) if start is not None else df[date_col].min()
-    hi = pd.to_datetime(end) if end is not None else df[date_col].max()
-    df = df[(df[date_col] >= lo) & (df[date_col] <= hi)]
+    df = add_time_features(df, date_col=date_col, add_cyclic=add_cyclic)
 
-    if df.empty:
-        empty = pd.DataFrame(
-            columns=[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"]
-        )
-        _save_result_df(
-            empty,
-            path=save_path,
-            fmt=save_format,
-            index=save_index,
-            partition=save_partitions,
-            station_col=id_col,
-        )
-        return empty
+    if feature_cols is None:
+        feats = [lat_col, lon_col, alt_col, "year", "month", "doy"]
+        if add_cyclic:
+            feats += ["doy_sin", "doy_cos"]
+    else:
+        feats = list(feature_cols)
 
-    # ------------------------------------------------------------------
-    # 2) Feature engineering (calendar + XYZT)
-    # ------------------------------------------------------------------
-    df = add_calendar_features(df, date_col=date_col, add_cyclic=add_cyclic)
-    feats = default_feature_names(
-        lat_col=lat_col,
-        lon_col=lon_col,
-        alt_col=alt_col,
-        add_cyclic=add_cyclic,
-        extra=None,
+    # mantén sólo las columnas necesarias (id, fecha, coords, target, features)
+    keep = sorted(
+        set([id_col, date_col, lat_col, lon_col, alt_col, target_col] + feats)
     )
+    df = df[keep]
+    return df, feats
 
-    # ------------------------------------------------------------------
-    # 3) Station selection (OR semantics)
-    # ------------------------------------------------------------------
+
+def _select_stations(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    prefix: Optional[Iterable[str]],
+    station_ids: Optional[Iterable[Union[str, int]]],
+    regex: Optional[str],
+    custom_filter: Optional[Callable[[Union[str, int]], bool]],
+) -> List[Union[str, int]]:
+    """
+    Apply OR semantics over filters to select station ids.
+    """
     all_ids = df[id_col].dropna().unique().tolist()
     chosen: List[Union[str, int]] = []
 
     if prefix is not None:
         if isinstance(prefix, str):
-            prefix_iter = [prefix]
-        else:
-            prefix_iter = list(prefix)
-        for p in prefix_iter:
+            prefix = [prefix]
+        for p in prefix:
             chosen.extend([s for s in all_ids if str(s).startswith(str(p))])
 
     if station_ids is not None:
@@ -506,7 +189,7 @@ def impute_dataset(
         import re
 
         pat = re.compile(regex)
-        chosen.extend([s for s in all_ids if pat.search(str(s))])
+        chosen.extend([s for s in all_ids if pat.match(str(s))])
 
     if custom_filter is not None:
         chosen.extend([s for s in all_ids if custom_filter(s)])
@@ -514,252 +197,381 @@ def impute_dataset(
     if not chosen:
         chosen = all_ids
 
-    # Stable order, unique
+    # make unique, preserving order
     seen = set()
-    stations = [s for s in chosen if not (s in seen or seen.add(s))]
+    out: List[Union[str, int]] = []
+    for s in chosen:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
-    # ------------------------------------------------------------------
-    # 4) MDR filter (by observed target rows in window)
-    # ------------------------------------------------------------------
-    if min_station_rows is not None and min_station_rows > 0:
-        observed_mask = ~df[target_col].isna()
-        obs_counts = (
-            df.loc[observed_mask, [id_col, target_col]]
-            .groupby(id_col, sort=False)[target_col]
-            .size()
-            .astype(int)
-        )
-        eligible = [s for s in stations if int(obs_counts.get(s, 0)) >= int(min_station_rows)]
-        if show_progress and len(eligible) != len(stations):
-            skipped = [s for s in stations if s not in eligible]
-            tqdm.write(
-                f"min_station_rows(observed≥{min_station_rows}): "
-                f"{len(stations)} → {len(eligible)} stations "
-                f"(skipped {len(skipped)})"
-            )
-        stations = eligible
 
-    if not stations:
-        empty = pd.DataFrame(
-            columns=[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"]
-        )
-        _save_result_df(
-            empty,
-            path=save_path,
-            fmt=save_format,
-            index=save_index,
-            partition=save_partitions,
-            station_col=id_col,
-        )
-        return empty
+def _apply_min_station_rows(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    target_col: str,
+    stations: List[Union[str, int]],
+    min_station_rows: Optional[int],
+) -> List[Union[str, int]]:
+    """
+    Filter station ids by minimum count of observed (non-NaN) target values.
+    """
+    if min_station_rows is None:
+        return stations
 
-    # ------------------------------------------------------------------
-    # 5) Neighbor map / training pool
-    # ------------------------------------------------------------------
+    counts = (
+        df.loc[~df[target_col].isna(), [id_col, target_col]]
+        .groupby(id_col)[target_col]
+        .size()
+        .astype(int)
+    )
+    return [s for s in stations if int(counts.get(s, 0)) >= int(min_station_rows)]
+
+
+def _build_neighbors_if_needed(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    lat_col: str,
+    lon_col: str,
+    k_neighbors: Optional[int],
+    neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]],
+) -> Tuple[Optional[Dict[Union[str, int], List[Union[str, int]]]], Optional[int]]:
+    """
+    Decide which neighbor map to use.
+
+    Returns
+    -------
+    (nmap, used_k)
+    """
     if neighbor_map is not None:
-        nmap = neighbor_map
-    elif k_neighbors is not None:
-        nmap = build_neighbor_map(
-            data=df,
-            id_col=id_col,
-            lat_col=lat_col,
-            lon_col=lon_col,
-            k=int(k_neighbors),
-            include_self=False,
-        )
-    else:
-        nmap = None
+        return neighbor_map, None
+    if k_neighbors is None:
+        return None, None
+    nmap = build_neighbor_map(
+        df,
+        id_col=id_col,
+        lat_col=lat_col,
+        lon_col=lon_col,
+        k=int(k_neighbors),
+        include_self=False,
+    )
+    return nmap, int(k_neighbors)
 
-    # Canonical date grid & station medoids for output
-    full_dates = pd.date_range(lo, hi, freq="D")
-    medoids = (
-        df.groupby(id_col)[[lat_col, lon_col, alt_col]]
-        .median(numeric_only=True)
-        .rename(columns={lat_col: "latitude", lon_col: "longitude", alt_col: "altitude"})
+
+def _sample_target_rows_for_training(
+    target_valid: pd.DataFrame,
+    *,
+    target_col: str,
+    include_target_pct: float,
+    seed: int,
+) -> pd.DataFrame:
+    """
+    From the target station's valid rows (non-NaN target and features),
+    sample a percentage to be included in the training set.
+
+    This function **does not** create a test set: unused valid rows remain
+    as purely "observed" and are not fed to the regressor.
+
+    Parameters
+    ----------
+    target_valid : DataFrame
+        Rows for a single station with valid features and non-NaN target.
+    target_col : str
+        Name of the target column.
+    include_target_pct : float
+        Percentage (0..100). 0 => no rows included in training.
+    seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    inc_df : DataFrame
+        Subset of target_valid to be added to the training pool.
+    """
+    pct = float(include_target_pct)
+    if pct <= 0.0 or target_valid.empty:
+        return target_valid.iloc[0:0]  # empty with same schema
+
+    pct = max(0.0, min(pct, 100.0))
+    n_total = len(target_valid)
+    n_take = int(np.floor(n_total * (pct / 100.0)))
+
+    if n_take <= 0:
+        return target_valid.iloc[0:0]
+
+    rng = np.random.RandomState(int(seed))
+    chosen_idx = rng.choice(target_valid.index.to_numpy(), size=n_take, replace=False)
+    inc_df = target_valid.loc[chosen_idx]
+    return inc_df
+
+
+# --------------------------------------------------------------------------- #
+# Public API
+# --------------------------------------------------------------------------- #
+
+
+def impute_dataset(
+    data: pd.DataFrame,
+    *,
+    # column names
+    id_col: str,
+    date_col: str,
+    lat_col: str,
+    lon_col: str,
+    alt_col: str,
+    target_col: str,
+    # period
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    # feature config
+    add_cyclic: bool = False,
+    feature_cols: Optional[Sequence[str]] = None,
+    # station selection
+    prefix: Optional[Iterable[str]] = None,
+    station_ids: Optional[Iterable[Union[str, int]]] = None,
+    regex: Optional[str] = None,
+    custom_filter: Optional[Callable[[Union[str, int]], bool]] = None,
+    min_station_rows: Optional[int] = None,
+    # neighborhood & leakage
+    k_neighbors: Optional[int] = None,
+    neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]] = None,
+    include_target_pct: float = 100.0,
+    include_target_seed: int = 42,
+    # model
+    model_kind: str = "rf",
+    model_params: Optional[Dict[str, Any]] = None,
+    # output
+    source_col: str = "source",
+    show_progress: bool = False,
+) -> pd.DataFrame:
+    """
+    Impute missing values of a daily climate variable using XYZT regression.
+
+    For each target station:
+
+    1. A training pool is built from:
+
+       - All other stations, or only those specified by a neighbor map
+         (either precomputed or built with Haversine KNN), and
+       - A subset of the target station's *observed* rows, controlled by
+         ``include_target_pct``.
+
+    2. A regression model is instantiated with :func:`make_model` using
+       ``model_kind`` and ``model_params`` and fit on the training pool.
+
+    3. The fitted model is applied to all rows of the target station where
+       ``target_col`` is NaN but all selected features are non-NaN. These
+       rows become "imputed".
+
+    Parameters
+    ----------
+    data : DataFrame
+        Long-format table containing at least
+
+            [id_col, date_col, lat_col, lon_col, alt_col, target_col].
+
+    id_col, date_col, lat_col, lon_col, alt_col, target_col : str
+        Column names for station id, timestamp, geographic coordinates, and
+        the target variable to impute.
+    start, end : str or None
+        Optional inclusive time window. If provided, imputation is performed
+        only on rows in [start, end]; other rows are dropped from the output.
+    add_cyclic : bool
+        If True, add sine/cosine of day-of-year as extra features.
+    feature_cols : sequence of str or None
+        Explicit list of feature columns to use. If None, defaults to:
+
+            [lat_col, lon_col, alt_col, "year", "month", "doy"] (+ sin/cos).
+
+    prefix, station_ids, regex, custom_filter :
+        Optional filters to select which stations are **imputed** (OR semantics).
+        Unselected stations are passed through unchanged, except for the
+        addition of ``source_col``.
+    min_station_rows : int or None
+        Minimum number of observed (non-NaN) target rows required for a
+        station to be imputed. Stations with fewer observations are left
+        unchanged.
+
+    k_neighbors : int or None
+        If provided and ``neighbor_map`` is None, builds a KNN map over
+        station centroids (lat/lon) and restricts the training pool for each
+        target station to its K nearest neighbors.
+    neighbor_map : dict or None
+        Custom neighbor map {station_id -> [neighbor_ids,...]}. If provided,
+        ``k_neighbors`` is ignored.
+    include_target_pct : float
+        Percentage (0..100) of the target station's *observed* rows to add
+        to the training pool. Use 0.0 for strict LOSO-like imputation
+        (training only on other stations). Default 100.0 uses all observed
+        rows.
+    include_target_seed : int
+        Seed used when sampling target rows for training.
+
+    model_kind : str
+        Identifier understood by :func:`make_model` (e.g. "rf", "etr", "ridge",
+        "mlp", "xgb" if xgboost is installed, etc.).
+    model_params : dict or None
+        Hyperparameters passed to :func:`make_model`. Missing keys fall back
+        to model-specific defaults.
+
+    source_col : str
+        Name of the column indicating the origin of each value
+        ("observed"/"imputed"/"missing").
+    show_progress : bool
+        If True, display a per-station progress bar using tqdm (when
+        available).
+
+    Returns
+    -------
+    DataFrame
+        Copy of the input (possibly time-windowed) with ``target_col``
+        imputed where possible and an extra ``source_col`` column.
+    """
+    validate_required_columns(
+        data,
+        [id_col, date_col, lat_col, lon_col, alt_col, target_col],
+        context="impute_dataset",
     )
 
-    # Global mask of rows with complete XYZT + target for training
-    valid_mask_global = ~df[feats + [target_col]].isna().any(axis=1)
+    # Preprocess and build XYZT features
+    df_xyzt, feats = _prepare_xyzt(
+        data,
+        id_col=id_col,
+        date_col=date_col,
+        lat_col=lat_col,
+        lon_col=lon_col,
+        alt_col=alt_col,
+        target_col=target_col,
+        start=start,
+        end=end,
+        add_cyclic=add_cyclic,
+        feature_cols=feature_cols,
+    )
 
-    # Prepare model factory
-    # (Validation of model_kind happens inside make_model)
-    # ------------------------------------------------------------------
+    if df_xyzt.empty:
+        out = df_xyzt.copy()
+        out[source_col] = np.where(
+            out[target_col].notna(),
+            "observed",
+            "missing",
+        )
+        return out
+
+    # Validity mask for features + target (for training use)
+    valid_features_mask = ~df_xyzt[feats].isna().any(axis=1)
+    valid_global_mask = valid_features_mask & ~df_xyzt[target_col].isna()
+
+    # Decide which stations to process
+    stations_all = _select_stations(
+        df_xyzt,
+        id_col=id_col,
+        prefix=prefix,
+        station_ids=station_ids,
+        regex=regex,
+        custom_filter=custom_filter,
+    )
+    stations = _apply_min_station_rows(
+        df_xyzt,
+        id_col=id_col,
+        target_col=target_col,
+        stations=stations_all,
+        min_station_rows=min_station_rows,
+    )
+
+    # Neighbor map (if any)
+    nmap, used_k = _build_neighbors_if_needed(
+        df_xyzt,
+        id_col=id_col,
+        lat_col=lat_col,
+        lon_col=lon_col,
+        k_neighbors=k_neighbors,
+        neighbor_map=neighbor_map,
+    )
+
+    # Instantiate model template (we'll re-create per station to ensure
+    # independent random states etc.)
+    # We call make_model inside the loop so that every station starts
+    # from a fresh estimator.
+
+    # Prepare output copy with source flags
+    out = df_xyzt.copy()
+    out[source_col] = np.where(
+        out[target_col].notna(),
+        "observed",
+        "missing",
+    )
+
     iterator = tqdm(stations, desc="Imputing stations", unit="st") if show_progress else stations
-    out_blocks: List[pd.DataFrame] = []
 
     for sid in iterator:
-        # Medoid coordinates for reporting / grid
-        lat0 = float(medoids.loc[sid, "latitude"]) if sid in medoids.index else np.nan
-        lon0 = float(medoids.loc[sid, "longitude"]) if sid in medoids.index else np.nan
-        alt0 = float(medoids.loc[sid, "altitude"]) if sid in medoids.index else np.nan
-
-        # Base date grid for this station
-        grid = pd.DataFrame({date_col: full_dates})
-        grid[id_col] = sid
-        # Coordinates in original schema (for XYZT features)
-        grid[lat_col] = lat0
-        grid[lon_col] = lon0
-        grid[alt_col] = alt0
-
-        # Attach observed target values (restricted to window)
-        st_obs = df.loc[df[id_col] == sid, [date_col, target_col]]
-        merged = grid.merge(st_obs, on=date_col, how="left")
-
-        # Recompute calendar features on the full grid
-        merged = add_calendar_features(merged, date_col=date_col, add_cyclic=add_cyclic)
-
-        # Training pool: neighbors or all other stations (excluding target)
-        is_target_mask = df[id_col] == sid
-        if nmap is not None:
-            neigh_ids = nmap.get(sid, [])
-            pool_mask = df[id_col].isin(neigh_ids) & (~is_target_mask) & valid_mask_global
-        else:
-            pool_mask = (~is_target_mask) & valid_mask_global
-
-        train_pool = df.loc[pool_mask, feats + [target_col]]
-
-        # Fallback: if neighbor pool is empty, use all other stations with
-        # observed target within the window.
-        if train_pool.empty:
-            alt_pool_mask = (~is_target_mask) & (~df[target_col].isna()) & valid_mask_global
-            train_pool = df.loc[alt_pool_mask, feats + [target_col]]
-
-        # Local valid rows for this station (features + target present)
-        st_valid = df.loc[
-            is_target_mask & valid_mask_global,
-            feats + [target_col],
-        ]
-
-        # --------------------------------------------------------------
-        # 6) include_target_pct: random, reproducible sampling of local rows
-        # --------------------------------------------------------------
-        if include_target_pct is not None:
-            if include_target_pct < 0:
-                raise ValueError("include_target_pct must be >= 0 or None.")
-            if include_target_pct >= 100.0:
-                st_valid_for_train = st_valid  # full inclusion
-            else:
-                n_local = len(st_valid)
-                if n_local > 0:
-                    k_sel = int(np.floor(n_local * (include_target_pct / 100.0)))
-                    if k_sel > 0:
-                        rng = np.random.RandomState(int(include_target_seed))
-                        idx = rng.choice(st_valid.index.to_numpy(), size=k_sel, replace=False)
-                        st_valid_for_train = st_valid.loc[idx]
-                    else:
-                        # no local rows used in training
-                        st_valid_for_train = st_valid.iloc[0:0, :]
-                else:
-                    st_valid_for_train = st_valid
-        else:
-            # None → same as full inclusion
-            st_valid_for_train = st_valid
-
-        # Concatenate training pool + selected local rows
-        train_df = pd.concat([train_pool, st_valid_for_train], axis=0, ignore_index=True)
-
-        if train_df.empty:
-            # No training information at all → return observed-only rows
-            y_obs = merged[target_col].to_numpy()
-            mask_nan = np.isnan(y_obs)
-
-            source = np.empty(len(y_obs), dtype="object")
-            source[mask_nan] = np.nan
-            source[~mask_nan] = "observed"
-
-            out = pd.DataFrame(
-                {
-                    id_col: sid,
-                    "date": merged[date_col].to_numpy(),
-                    "latitude": np.full(len(merged), lat0, dtype=float),
-                    "longitude": np.full(len(merged), lon0, dtype=float),
-                    "altitude": np.full(len(merged), alt0, dtype=float),
-                    target_col: y_obs,
-                    "source": source,
-                }
-            )
-            out_blocks.append(out)
-            if show_progress:
-                tqdm.write(f"Station {sid}: empty training set → observed-only.")
+        # Rows for this station
+        station_mask = out[id_col] == sid
+        if not station_mask.any():
             continue
 
-        # ------------------------------------------------------------------
-        # 7) Fit model & predict full grid
-        # ------------------------------------------------------------------
-        X_train = train_df[feats].to_numpy(copy=False)
-        y_train = train_df[target_col].to_numpy(copy=False)
+        # Observed rows (valid target) for this station (candidates for training)
+        station_valid_global = valid_global_mask & station_mask
+        target_valid = out.loc[station_valid_global].copy()
 
-        model = make_model(model_kind=model_kind, model_params=model_params)
+        # Missing rows that we may try to impute (NaN target but features valid)
+        station_missing = station_mask & out[target_col].isna() & valid_features_mask
+
+        if not station_missing.any():
+            # Nothing to impute for this station
+            continue
+
+        # If we lack observed data for this station, we may still try to
+        # impute from neighbors only (LOSO), provided there is a non-empty
+        # training pool.
+        # Build training pool from neighbors / all-other stations
+        if nmap is not None:
+            neigh_ids = nmap.get(sid, [])
+            train_pool_mask = out[id_col].isin(neigh_ids) & valid_global_mask
+        else:
+            # all other stations
+            train_pool_mask = (~station_mask) & valid_global_mask
+
+        train_pool = out.loc[train_pool_mask].copy()
+
+        # Optionally add a subset of the target station's own observed rows
+        if include_target_pct > 0.0 and not target_valid.empty:
+            inc_target_df = _sample_target_rows_for_training(
+                target_valid,
+                target_col=target_col,
+                include_target_pct=include_target_pct,
+                seed=include_target_seed,
+            )
+            if not inc_target_df.empty:
+                train_pool = pd.concat([train_pool, inc_target_df], axis=0, copy=False)
+
+        if train_pool.empty:
+            # No training data → cannot impute this station
+            if show_progress:
+                tqdm.write(f"Station {sid}: empty training pool (skipped)")
+            continue
+
+        # Fit model and impute
+        model = make_model(model_kind=model_kind, model_params=model_params or {})
+        X_train = train_pool[feats].to_numpy(copy=False)
+        y_train = train_pool[target_col].to_numpy(copy=False)
         model.fit(X_train, y_train)
 
-        X_full = merged[feats].to_numpy(copy=False)
-        y_hat = model.predict(X_full)
+        missing_idx = out.index[station_missing]
+        X_missing = out.loc[missing_idx, feats].to_numpy(copy=False)
+        try:
+            y_hat = model.predict(X_missing)
+        except Exception as exc:  # pragma: no cover - defensive
+            if show_progress:
+                tqdm.write(f"Station {sid}: prediction failed ({exc!r})")
+            continue
 
-        # Observed values win; only fill gaps
-        y_obs = merged[target_col].to_numpy()
-        mask_nan = np.isnan(y_obs)
-        filled = y_obs.copy()
-        filled[mask_nan] = y_hat[mask_nan]
+        out.loc[missing_idx, target_col] = y_hat
+        out.loc[missing_idx, source_col] = "imputed"
 
-        # Build 'source'
-        if merged[target_col].isna().all():
-            # Pure LOSO (no observations at all): all rows imputed
-            source = np.full(len(merged), "imputed", dtype="object")
-        else:
-            source = np.empty(len(y_obs), dtype="object")
-            source[mask_nan] = "imputed"
-            source[~mask_nan] = "observed"
-
-        out = pd.DataFrame(
-            {
-                id_col: sid,
-                "date": merged[date_col].to_numpy(),
-                "latitude": np.full(len(merged), lat0, dtype=float),
-                "longitude": np.full(len(merged), lon0, dtype=float),
-                "altitude": np.full(len(merged), alt0, dtype=float),
-                target_col: filled,
-                "source": source,
-            }
-        )
-        out_blocks.append(out)
-
-        if show_progress:
-            n_obs = int((out["source"] == "observed").sum())
-            n_imp = int((out["source"] == "imputed").sum())
-            k_text: Union[int, str]
-            if nmap is None:
-                k_text = "all"
-            else:
-                k_text = len(nmap.get(sid, []))
-            pct_text = (
-                100 if include_target_pct is None else include_target_pct
-            )
-            tqdm.write(
-                f"Station {sid}: window={len(out):,}  observed={n_obs:,}  "
-                f"imputed={n_imp:,}  k={k_text}, include_target_pct={pct_text}"
-            )
-
-    # ----------------------------------------------------------------------
-    # 8) Stack, sort, save, return
-    # ----------------------------------------------------------------------
-    result = pd.concat(out_blocks, axis=0, ignore_index=True)
-    result = result.sort_values([id_col, "date"], kind="mergesort").reset_index(drop=True)
-
-    # Ensure exact column order
-    result = result[[id_col, "date", "latitude", "longitude", "altitude", target_col, "source"]]
-
-    _save_result_df(
-        result,
-        path=save_path,
-        fmt=save_format,
-        index=save_index,
-        partition=save_partitions,
-        station_col=id_col,
-    )
-
-    return result
+    return out
 
 
-__all__ = [
-    "impute_dataset",
-]
+__all__ = ["impute_dataset"]

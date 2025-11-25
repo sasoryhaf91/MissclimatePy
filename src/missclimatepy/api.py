@@ -3,35 +3,69 @@
 missclimatepy.api
 =================
 
-High-level public interface for MissClimatePy.
+Convenience API for MissClimatePy.
 
 This module exposes *minimal* but convenient entry points that wrap the
 core functionality implemented in the internal submodules:
 
-- :func:`evaluate_xyzt` → station-wise model evaluation.
-- :func:`impute_xyzt`   → local imputation of a target series.
+- :func:`evaluate_xyzt` → station-wise model evaluation on XYZT features.
+- :func:`impute_xyzt`   → network-wide imputation of a target series.
 - :func:`build_neighbor_map` → spatial KNN neighbor map in (lat, lon).
 
-It also re-exports the model factory utilities:
+It also re-exports commonly used utilities for diagnostics:
 
-- :func:`make_model` and :data:`SUPPORTED_MODELS` from :mod:`missclimatepy.models`.
+- Masking helpers (coverage, gap profiles, random masking).
+- Metric helpers (MAE/RMSE/R2/KGE, aggregated metrics).
+- Visualization helpers (missingness matrix, parity plots, etc.).
 
-and a small set of plotting helpers from :mod:`missclimatepy.viz`.
+Typical usage (Kaggle-style)
+----------------------------
 
-The goal is to provide a clean, discoverable surface API while keeping the
-internals modular and testable.
+>>> import pandas as pd
+>>> import missclimatepy as mcp
+>>> from missclimatepy import api
+>>>
+>>> df = pd.read_csv("smn_mx_daily.csv", parse_dates=["date"])
+>>>
+>>> report, preds = api.evaluate_xyzt(
+...     data=df,
+...     id_col="station", date_col="date",
+...     lat_col="lat", lon_col="lon", alt_col="alt",
+...     target_col="tmin",
+...     start="1991-01-01", end="2020-12-31",
+...     model_kind="rf",
+...     model_params={"n_estimators": 200, "random_state": 42},
+...     k_neighbors=20,
+...     include_target_pct=10.0,
+...     min_station_rows=3650,
+...     include_mcm_baseline=True,
+...     include_kge=True,
+... )
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Tuple
 
 import pandas as pd
 
-from .neighbors import build_neighbor_map
 from .evaluate import evaluate_stations
 from .impute import impute_dataset
-from .models import SUPPORTED_MODELS, make_model
+from .neighbors import build_neighbor_map
+
+from .metrics import (
+    compute_metrics,
+    aggregate_and_compute,
+)
+
+from .masking import (
+    percent_missing_between,
+    gap_profile_by_station,
+    missing_matrix,
+    describe_missing,
+    apply_random_mask_by_station,
+)
+
 from .viz import (
     plot_missing_matrix,
     plot_metrics_distribution,
@@ -43,111 +77,82 @@ from .viz import (
     plot_imputation_coverage,
 )
 
+from .models import (
+    SUPPORTED_MODELS,
+    make_model,
+)
 
-# --------------------------------------------------------------------------- #
-# High-level evaluation wrapper
-# --------------------------------------------------------------------------- #
+
+# ---------------------------------------------------------------------------
+# High-level wrappers
+# ---------------------------------------------------------------------------
 
 
-def evaluate_xyzt(
-    data: pd.DataFrame,
-    **kwargs: Dict[str, Any],
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def evaluate_xyzt(*args, **kwargs) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Station-wise evaluation of XYZT-style models.
+    Station-wise evaluation on XYZT features.
 
-    This is a thin, user-facing wrapper around
-    :func:`missclimatepy.evaluate.evaluate_stations`. It forwards all keyword
-    arguments to that function, so the full set of options (station selection,
-    neighbourhood configuration, model kind & hyperparameters, logging, etc.)
-    is available without duplicating the signature here.
-
-    Parameters
-    ----------
-    data : DataFrame
-        Long-format table containing station id, date, coordinates and the
-        target variable to be modelled.
-    **kwargs :
-        Any keyword arguments accepted by
-        :func:`missclimatepy.evaluate.evaluate_stations`, such as:
-
-        - ``id_col``, ``date_col``, ``lat_col``, ``lon_col``, ``alt_col``,
-          ``target_col``;
-        - ``start``, ``end``;
-        - ``add_cyclic``, ``feature_cols``;
-        - station-selection options (``prefix``, ``station_ids``, ``regex``,
-          ``custom_filter``, ``min_station_rows``);
-        - neighbourhood options (``k_neighbors``, ``neighbor_map``);
-        - leakage control (``include_target_pct``, ``include_target_seed``);
-        - model configuration (``model_kind``, ``model_params``);
-        - output and logging options.
+    This is a thin wrapper around :func:`missclimatepy.evaluate_stations`
+    that simply forwards all positional and keyword arguments.
 
     Returns
     -------
-    report : DataFrame
-        Per-station metrics at daily, monthly and yearly scales.
-    preds : DataFrame
-        Per-row predictions with observed and modelled values.
+    (report, predictions) : (DataFrame, DataFrame)
+        Exactly the same output as :func:`evaluate_stations`.
     """
-    return evaluate_stations(data=data, **kwargs)
+    return evaluate_stations(*args, **kwargs)
 
 
-# --------------------------------------------------------------------------- #
-# High-level imputation wrapper
-# --------------------------------------------------------------------------- #
-
-
-def impute_xyzt(
-    data: pd.DataFrame,
-    **kwargs: Dict[str, Any],
-) -> pd.DataFrame:
+def impute_xyzt(*args, **kwargs) -> pd.DataFrame:
     """
-    Impute daily station records using XYZT-style models.
+    Network-wide imputation on XYZT features.
 
-    This is a thin wrapper around
-    :func:`missclimatepy.impute.impute_dataset`. It forwards all keyword
-    arguments to that function, allowing users to control:
-
-    - the schema (id/date/coordinate/target columns),
-    - the temporal window,
-    - station selection and Minimum Data Requirement (MDR),
-    - neighbourhood configuration (KNN map or all-stations),
-    - model kind and hyperparameters, and
-    - optional on-disk persistence (CSV/Parquet, with or without partitions).
-
-    Parameters
-    ----------
-    data : DataFrame
-        Long-format table with station id, date, coordinates and the target
-        variable to be imputed (containing NaNs).
-    **kwargs :
-        Any keyword arguments accepted by
-        :func:`missclimatepy.impute.impute_dataset`.
+    This is a thin wrapper around :func:`missclimatepy.impute_dataset`
+    that simply forwards all positional and keyword arguments.
 
     Returns
     -------
     DataFrame
-        A long-format table with the minimal schema:
+        Long-format output with columns:
 
-        ``[station, date, latitude, longitude, altitude, <target>, source]``
-
-        where ``source`` is ``"observed"`` or ``"imputed"``.
+        [station, date, latitude, longitude, altitude, <target>, source]
     """
-    return impute_dataset(data=data, **kwargs)
+    return impute_dataset(*args, **kwargs)
 
 
-# --------------------------------------------------------------------------- #
-# Re-exports for convenience
-# --------------------------------------------------------------------------- #
+# Optional convenience aliases matching top-level style
+def evaluate(*args, **kwargs):
+    """
+    Alias of :func:`evaluate_xyzt` for users who prefer a shorter name.
+    """
+    return evaluate_xyzt(*args, **kwargs)
 
-# Spatial neighbour utilities
+
+def impute(*args, **kwargs):
+    """
+    Alias of :func:`impute_xyzt` for users who prefer a shorter name.
+    """
+    return impute_xyzt(*args, **kwargs)
+
+
 __all__ = [
+    # High-level wrappers
     "evaluate_xyzt",
     "impute_xyzt",
+    "evaluate",
+    "impute",
+    # Neighbors
     "build_neighbor_map",
-    "make_model",
-    "SUPPORTED_MODELS",
-    # plotting helpers
+    # Metrics
+    "compute_metrics",
+    "aggregate_and_compute",
+    # Masking
+    "percent_missing_between",
+    "gap_profile_by_station",
+    "missing_matrix",
+    "describe_missing",
+    "apply_random_mask_by_station",
+    # Visualization
     "plot_missing_matrix",
     "plot_metrics_distribution",
     "plot_parity_scatter",
@@ -156,4 +161,7 @@ __all__ = [
     "plot_gap_histogram",
     "plot_imputed_series",
     "plot_imputation_coverage",
+    # Models
+    "SUPPORTED_MODELS",
+    "make_model",
 ]
