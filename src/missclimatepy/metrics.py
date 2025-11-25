@@ -3,224 +3,321 @@
 missclimatepy.metrics
 =====================
 
-Metric utilities for MissClimatePy.
+Core regression metrics for MissClimatePy.
+
+This module centralizes metric calculations used across the package:
+
+- Point-scale metrics on paired series:
+
+  * MAE  (mean absolute error)
+  * RMSE (root-mean-square error)
+  * R2   (coefficient of determination)
+  * KGE  (Kling–Gupta efficiency)
+
+- Convenience helpers:
+
+  * ``compute_metrics``: returns a dictionary with MAE/RMSE/R2 and
+    optionally KGE, handling NaNs and empty inputs gracefully.
+  * ``aggregate_and_compute``: aggregates a time series to a given
+    frequency (e.g. monthly, yearly) and computes the same metrics.
+
+The design is intentionally lightweight:
+
+- Input arrays are converted to NumPy float arrays and paired NaNs
+  are removed before computing metrics.
+- Degenerate cases (empty series, zero variance, zero means) return
+  metrics as ``np.nan`` instead of raising errors.
+- Time aggregation uses :func:`missclimatepy.features.ensure_datetime_naive`
+  to standardize datetime handling.
 """
 
 from __future__ import annotations
+
+from typing import Dict, Tuple
+
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
-from typing import Any, Dict
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+from .features import ensure_datetime_naive, validate_required_columns
 
 
-# ----------------------------------------------------------
-# Safe helpers
-# ----------------------------------------------------------
-
-def _safe_mean(x: np.ndarray) -> float:
-    return float(np.nanmean(x)) if np.isfinite(x).any() else np.nan
+# --------------------------------------------------------------------------- #
+# Basic metric primitives
+# --------------------------------------------------------------------------- #
 
 
-def _safe_std(x: np.ndarray) -> float:
-    return float(np.nanstd(x, ddof=1)) if np.isfinite(x).any() else np.nan
+def _to_clean_pairs(
+    y_true,
+    y_pred,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Convert inputs to paired float arrays and drop NaNs pairwise.
+
+    Parameters
+    ----------
+    y_true, y_pred : array-like
+        Observed and predicted values.
+
+    Returns
+    -------
+    (yt, yp) : tuple of ndarray
+        Cleaned arrays of matching length, dtype float64.
+    """
+    yt = np.asarray(y_true, dtype="float64")
+    yp = np.asarray(y_pred, dtype="float64")
+
+    if yt.shape != yp.shape:
+        raise ValueError(
+            f"y_true and y_pred must have the same shape. "
+            f"Got {yt.shape} vs {yp.shape}."
+        )
+
+    mask = ~(np.isnan(yt) | np.isnan(yp))
+    yt = yt[mask]
+    yp = yp[mask]
+    return yt, yp
 
 
-def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
-    mask = np.isfinite(x) & np.isfinite(y)
-    if mask.sum() < 2:
-        return np.nan
-    xm = x[mask] - x[mask].mean()
-    ym = y[mask] - y[mask].mean()
-    denom = np.sqrt((xm**2).sum() * (ym**2).sum())
-    return float((xm * ym).sum() / denom) if denom != 0 else np.nan
+def mae(y_true, y_pred) -> float:
+    """
+    Mean absolute error (MAE) with NaN/empty handling.
+
+    Returns ``np.nan`` if the cleaned series is empty.
+    """
+    yt, yp = _to_clean_pairs(y_true, y_pred)
+    if yt.size == 0:
+        return float("nan")
+    return float(np.mean(np.abs(yt - yp)))
 
 
-# ----------------------------------------------------------
-# KGE
-# ----------------------------------------------------------
+def rmse(y_true, y_pred) -> float:
+    """
+    Root-mean-square error (RMSE) with NaN/empty handling.
 
-def compute_kge(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    y_true = np.asarray(y_true, float)
-    y_pred = np.asarray(y_pred, float)
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-
-    if mask.sum() < 2:
-        # Special case: only one pair and it matches perfectly → KGE = 1
-        if mask.sum() == 1 and y_true[mask][0] == y_pred[mask][0]:
-            return 1.0
-        return np.nan
-
-    yt = y_true[mask]
-    yp = y_pred[mask]
-
-    mu_o = yt.mean()
-    mu_p = yp.mean()
-    sigma_o = yt.std(ddof=1)
-    sigma_p = yp.std(ddof=1)
-    r = _safe_corr(yt, yp)
-
-    if sigma_o == 0 or not np.isfinite(r):
-        return np.nan
-
-    alpha = sigma_p / sigma_o
-    beta = mu_p / mu_o
-
-    return float(1 - np.sqrt((r - 1) ** 2 + (alpha - 1) ** 2 + (beta - 1) ** 2))
+    Returns ``np.nan`` if the cleaned series is empty.
+    """
+    yt, yp = _to_clean_pairs(y_true, y_pred)
+    if yt.size == 0:
+        return float("nan")
+    diff = yt - yp
+    return float(np.sqrt(np.mean(diff * diff)))
 
 
-# ----------------------------------------------------------
-# MCM
-# ----------------------------------------------------------
+def r2(y_true, y_pred) -> float:
+    """
+    Coefficient of determination R² with NaN/degenerate handling.
 
-def compute_mcm_baseline(
-    *,
-    dates: Any,
-    values: Any,
-    mode: str = "doy",
-    min_samples: int = 1,
-) -> pd.Series:
+    - If the cleaned series is empty, returns NaN.
+    - If variance of y_true is zero or length < 2, returns NaN.
+    """
+    yt, yp = _to_clean_pairs(y_true, y_pred)
+    if yt.size < 2:
+        return float("nan")
 
-    dates = pd.to_datetime(dates)
-    vals = pd.Series(values).astype(float)
-    n = len(vals)
-    global_mean = vals.mean(skipna=True)
+    var_y = float(np.var(yt))
+    if var_y == 0.0:
+        return float("nan")
 
-    if not np.isfinite(global_mean):
-        return pd.Series(np.nan, index=range(n), dtype=float)
+    ss_res = float(np.sum((yt - yp) ** 2))
+    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
+    if ss_tot == 0.0:
+        return float("nan")
 
-    if mode.lower() == "global":
-        return pd.Series(global_mean, index=range(n), dtype=float)
-
-    if mode.lower() == "month":
-        groups = dates.month
-    elif mode.lower() == "doy":
-        groups = dates.dayofyear
-    else:
-        raise ValueError("Unknown MCM mode")
-
-    df = pd.DataFrame({"grp": groups, "val": vals})
-    grp_stats = df.groupby("grp")["val"].agg(["mean", "count"])
-    grp_mean = grp_stats["mean"].copy()
-    grp_mean[grp_stats["count"] < min_samples] = np.nan
-    local_vals = df["grp"].map(grp_mean).fillna(global_mean)
-
-    # Ensure exact length
-    return pd.Series(local_vals.values, index=range(n), dtype=float)
+    return float(1.0 - ss_res / ss_tot)
 
 
-# ----------------------------------------------------------
-# Multi-scale metrics
-# ----------------------------------------------------------
+def kge(y_true, y_pred) -> float:
+    """
+    Kling–Gupta Efficiency (KGE) following the revised formulation:
 
-@dataclass
-class _MetricSet:
-    MAE: float
-    RMSE: float
-    R2: float
-    KGE: float
+        KGE = 1 - sqrt( (r - 1)^2 + (α - 1)^2 + (β - 1)^2 )
 
+    where:
 
-def _compute_basic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> _MetricSet:
-    """Compute MAE, RMSE, R2 and KGE on finite pairs (y_true, y_pred).
+        r  = Pearson correlation between y_pred and y_true
+        α  = σ_pred / σ_true  (ratio of standard deviations)
+        β  = μ_pred / μ_true  (ratio of means)
 
     Notes
     -----
-    - If there are **no** finite (y_true, y_pred) pairs, this returns
-      MAE = 0.0, RMSE = 0.0, and R2 = KGE = NaN. This avoids propagating
-      NaNs to station-level summaries when no observations are available,
-      while keeping correlation-like metrics undefined.
+    - Pairwise NaNs are dropped before calculation.
+    - Returns ``np.nan`` if the cleaned series is empty or if any
+      of the required statistics (mean, std, correlation) is not
+      well defined (e.g. zero variance, zero mean).
     """
-    y_true = np.asarray(y_true, float)
-    y_pred = np.asarray(y_pred, float)
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    yt, yp = _to_clean_pairs(y_true, y_pred)
+    n = yt.size
 
-    # Case: zero finite values → no information
-    if mask.sum() == 0:
-        return _MetricSet(
-            MAE=0.0,
-            RMSE=0.0,
-            R2=np.nan,
-            KGE=np.nan,
-        )
+    if n == 0:
+        return float("nan")
 
-    # Case: single value → "perfect" if equal
-    if mask.sum() == 1:
-        if y_true[mask][0] == y_pred[mask][0]:
-            return _MetricSet(0.0, 0.0, 1.0, 1.0)
-        else:
-            diff = abs(y_true[mask][0] - y_pred[mask][0])
-            return _MetricSet(
-                MAE=diff,
-                RMSE=diff,
-                R2=1.0,
-                KGE=np.nan,
-            )
+    mu_o = float(np.mean(yt))
+    mu_p = float(np.mean(yp))
+    std_o = float(np.std(yt, ddof=1)) if n > 1 else 0.0
+    std_p = float(np.std(yp, ddof=1)) if n > 1 else 0.0
 
-    yt = y_true[mask]
-    yp = y_pred[mask]
+    # Degenerate cases: undefined stats → NaN
+    if n < 2 or std_o == 0.0 or mu_o == 0.0:
+        return float("nan")
 
-    mae = float(mean_absolute_error(yt, yp))
-    rmse = float(np.sqrt(mean_squared_error(yt, yp)))
-    r2 = float(r2_score(yt, yp))
-    kge = compute_kge(yt, yp)
+    # Pearson correlation
+    r_num = float(np.sum((yt - mu_o) * (yp - mu_p)))
+    r_den = float((n - 1) * std_o * std_p) if std_p != 0.0 else 0.0
+    if r_den == 0.0:
+        return float("nan")
+    r = r_num / r_den
 
-    return _MetricSet(mae, rmse, r2, kge)
+    alpha = std_p / std_o
+    beta = mu_p / mu_o
+
+    kge_val = 1.0 - np.sqrt((r - 1.0) ** 2 + (alpha - 1.0) ** 2 + (beta - 1.0) ** 2)
+    return float(kge_val)
 
 
-def multiscale_metrics(
+# --------------------------------------------------------------------------- #
+# High-level helpers
+# --------------------------------------------------------------------------- #
+
+
+def compute_metrics(
+    y_true,
+    y_pred,
+    *,
+    include_kge: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute MAE, RMSE, R² and optionally KGE for a paired series.
+
+    Parameters
+    ----------
+    y_true, y_pred : array-like
+        Observed and predicted values.
+    include_kge : bool, default True
+        If True, includes "KGE" in the returned dictionary.
+
+    Returns
+    -------
+    dict
+        Keys:
+
+        - "MAE"
+        - "RMSE"
+        - "R2"
+        - "KGE" (optional, if ``include_kge=True``)
+
+        Values are floats, possibly NaN in degenerate cases.
+    """
+    out = {
+        "MAE": mae(y_true, y_pred),
+        "RMSE": rmse(y_true, y_pred),
+        "R2": r2(y_true, y_pred),
+    }
+    if include_kge:
+        out["KGE"] = kge(y_true, y_pred)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Time aggregation + metrics
+# --------------------------------------------------------------------------- #
+
+_FREQ_ALIAS = {"M": "MS", "A": "YS", "Y": "YS", "Q": "QS"}
+
+
+def _normalize_freq(freq: str) -> str:
+    """
+    Normalize short frequency codes to start-of-period aliases:
+
+    - "M"  → "MS" (month start)
+    - "Y"/"A" → "YS" (year start)
+    - "Q"      → "QS" (quarter start)
+    """
+    return _FREQ_ALIAS.get(freq, freq)
+
+
+def _validate_agg(agg: str) -> str:
+    if agg not in {"sum", "mean", "median"}:
+        raise ValueError("agg must be one of {'sum', 'mean', 'median'}.")
+    return agg
+
+
+def aggregate_and_compute(
     df: pd.DataFrame,
     *,
     date_col: str,
     y_col: str,
     yhat_col: str,
-    monthly_agg: str = "sum",
-    annual_agg: str = "sum",
-) -> Dict[str, Dict[str, float]]:
+    freq: str = "M",
+    agg: str = "sum",
+    include_kge: bool = True,
+) -> Tuple[Dict[str, float], pd.DataFrame]:
+    """
+    Aggregate a time series to a given frequency and compute metrics.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Table with at least [date_col, y_col, yhat_col].
+    date_col : str
+        Name of the datetime column.
+    y_col, yhat_col : str
+        Column names for observed and predicted values.
+    freq : str, default "M"
+        Pandas offset alias for resampling. Short forms "M", "Y"/"A", "Q"
+        are normalized to their start-of-period equivalents.
+    agg : {"sum","mean","median"}, default "sum"
+        Aggregation function applied to both observed and predicted.
+    include_kge : bool, default True
+        If True, includes KGE in the returned metrics.
+
+    Returns
+    -------
+    metrics : dict
+        Same structure as :func:`compute_metrics`, computed on the
+        aggregated series.
+    agg_df : DataFrame
+        Aggregated table with columns [y_col, yhat_col], indexed by
+        the resampled datetime index.
+
+    Notes
+    -----
+    - If ``df`` is empty or the aggregation results in an empty table,
+      all metrics are returned as NaN and ``agg_df`` is empty.
+    """
+    validate_required_columns(
+        df,
+        [date_col, y_col, yhat_col],
+        context="aggregate_and_compute",
+    )
 
     if df.empty:
-        empty = {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan, "KGE": np.nan}
-        return {"daily": empty, "monthly": empty, "annual": empty}
+        return {k: float("nan") for k in (["MAE", "RMSE", "R2"] + (["KGE"] if include_kge else []))}, df
 
-    d = df.copy()
-    d[date_col] = pd.to_datetime(d[date_col])
-    d.sort_values(by=date_col, inplace=True)
+    work = df[[date_col, y_col, yhat_col]].copy()
+    work[date_col] = ensure_datetime_naive(work[date_col])
+    work = work.dropna(subset=[date_col])
 
-    # DAILY
-    daily = _compute_basic_metrics(d[y_col], d[yhat_col])
+    if work.empty:
+        return {k: float("nan") for k in (["MAE", "RMSE", "R2"] + (["KGE"] if include_kge else []))}, work
 
-    # MONTHLY
-    d["year"] = d[date_col].dt.year
-    d["month"] = d[date_col].dt.month
-    agg_fn = monthly_agg.lower()
-    mg = d.groupby(["year", "month"])[[y_col, yhat_col]].agg(agg_fn).reset_index()
-    monthly = _compute_basic_metrics(mg[y_col], mg[yhat_col])
+    freq_norm = _normalize_freq(freq)
+    agg_op = _validate_agg(agg)
 
-    # ANNUAL
-    agg_fn2 = annual_agg.lower()
-    ag = d.groupby("year")[[y_col, yhat_col]].agg(agg_fn2).reset_index()
-    annual = _compute_basic_metrics(ag[y_col], ag[yhat_col])
+    work = work.set_index(date_col).sort_index()
+    agg_df = work.resample(freq_norm).agg({y_col: agg_op, yhat_col: agg_op}).dropna()
 
-    return {
-        "daily": {
-            "MAE": daily.MAE,
-            "RMSE": daily.RMSE,
-            "R2": daily.R2,
-            "KGE": daily.KGE,
-        },
-        "monthly": {
-            "MAE": monthly.MAE,
-            "RMSE": monthly.RMSE,
-            "R2": monthly.R2,
-            "KGE": monthly.KGE,
-        },
-        "annual": {
-            "MAE": annual.MAE,
-            "RMSE": annual.RMSE,
-            "R2": annual.R2,
-            "KGE": annual.KGE,
-        },
-    }
+    if agg_df.empty:
+        return {k: float("nan") for k in (["MAE", "RMSE", "R2"] + (["KGE"] if include_kge else []))}, agg_df
+
+    metrics = compute_metrics(agg_df[y_col].values, agg_df[yhat_col].values, include_kge=include_kge)
+    return metrics, agg_df
 
 
-__all__ = ["compute_kge", "compute_mcm_baseline", "multiscale_metrics"]
+__all__ = [
+    "mae",
+    "rmse",
+    "r2",
+    "kge",
+    "compute_metrics",
+    "aggregate_and_compute",
+]

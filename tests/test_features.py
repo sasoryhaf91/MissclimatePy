@@ -1,281 +1,209 @@
-# tests/test_features.py
 # SPDX-License-Identifier: MIT
+"""
+Tests for missclimatepy.features
+"""
 
-import pandas as pd
+from __future__ import annotations
+
 import numpy as np
+import pandas as pd
 import pytest
 
 from missclimatepy.features import (
-    validate_required_columns,
     ensure_datetime_naive,
-    add_calendar_features,
-    default_feature_names,
-    preprocess_for_model,
+    validate_required_columns,
+    add_time_features,
+    select_station_ids,
+    filter_by_min_station_rows,
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# ensure_datetime_naive
+# --------------------------------------------------------------------------- #
 
-def _make_simple_df():
+
+def test_ensure_datetime_naive_parses_strings_and_is_naive():
+    s = pd.Series(["2020-01-01", "2020-01-02", "not-a-date"])
+    out = ensure_datetime_naive(s)
+
+    # dtype datetime64[ns] and unparsable -> NaT
+    assert str(out.dtype) == "datetime64[ns]"
+    assert out.isna().sum() == 1
+
+
+def test_ensure_datetime_naive_drops_timezone():
+    base = pd.Series(["2020-01-01", "2020-01-02"])
+    tz_aware = pd.to_datetime(base).dt.tz_localize("UTC")
+
+    out = ensure_datetime_naive(tz_aware)
+
+    assert str(out.dtype) == "datetime64[ns]"
+    # naive series must not have tz information
+    assert getattr(out.dt, "tz", None) is None
+
+
+# --------------------------------------------------------------------------- #
+# validate_required_columns
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_required_columns_ok():
+    df = pd.DataFrame({"a": [1], "b": [2], "c": [3]})
+    # Should not raise
+    validate_required_columns(df, ["a", "b"])
+
+
+def test_validate_required_columns_raises_with_context():
+    df = pd.DataFrame({"a": [1], "b": [2]})
+
+    with pytest.raises(ValueError) as exc:
+        validate_required_columns(df, ["a", "c"], context="my_func")
+
+    msg = str(exc.value)
+    assert "[my_func]" in msg
+    assert "['c']" in msg  # missing column name is mentioned
+
+
+# --------------------------------------------------------------------------- #
+# add_time_features
+# --------------------------------------------------------------------------- #
+
+
+def test_add_time_features_basic_fields():
+    dates = pd.date_range("2020-01-01", periods=3, freq="D")
+    df = pd.DataFrame({"date": dates})
+
+    out = add_time_features(df, date_col="date", add_cyclic=False)
+
+    for col in ["year", "month", "doy"]:
+        assert col in out.columns
+
+    assert out["year"].iloc[0] == 2020
+    assert out["month"].iloc[0] == 1
+    assert out["doy"].tolist() == [1, 2, 3]
+
+
+def test_add_time_features_cyclic_added_when_requested():
+    dates = pd.date_range("2020-01-01", periods=10, freq="D")
+    df = pd.DataFrame({"date": dates})
+
+    out = add_time_features(df, date_col="date", add_cyclic=True)
+
+    for col in ["year", "month", "doy", "doy_sin", "doy_cos"]:
+        assert col in out.columns
+
+    # Values must be finite and within [-1, 1]
+    assert np.isfinite(out["doy_sin"]).all()
+    assert np.isfinite(out["doy_cos"]).all()
+    assert (out["doy_sin"].abs() <= 1 + 1e-8).all()
+    assert (out["doy_cos"].abs() <= 1 + 1e-8).all()
+
+
+# --------------------------------------------------------------------------- #
+# select_station_ids
+# --------------------------------------------------------------------------- #
+
+
+def _make_station_df():
     return pd.DataFrame(
         {
-            "station": ["A", "A", "B", "B"],
-            "date": [
-                "2020-01-01",
-                "2020-01-02",
-                "2020-01-01",
-                "2020-01-02",
-            ],
-            "lat": [10.0, 10.0, 11.0, 11.0],
-            "lon": [20.0, 20.0, 21.0, 21.0],
-            "alt": [100.0, 100.0, 200.0, 200.0],
-            "tmin": [5.0, 6.0, 7.0, 8.0],
+            "station": ["15001", "15002", "32010", "99999"],
+            "value": [1.0, 2.0, 3.0, 4.0],
         }
     )
 
 
-# ---------------------------------------------------------------------------
-# validate_required_columns
-# ---------------------------------------------------------------------------
-
-def test_validate_required_columns_ok():
-    df = _make_simple_df()
-    # Should not raise
-    validate_required_columns(df, ["station", "date", "lat"])
+def test_select_station_ids_default_returns_all():
+    df = _make_station_df()
+    out = select_station_ids(df, id_col="station")
+    assert out == ["15001", "15002", "32010", "99999"]
 
 
-def test_validate_required_columns_raises():
-    df = _make_simple_df()
-    with pytest.raises(ValueError) as exc:
-        validate_required_columns(df, ["station", "date", "missing_col"])
-    msg = str(exc.value)
-    assert "Missing required columns" in msg
-    assert "missing_col" in msg
+def test_select_station_ids_prefix_single_and_multi():
+    df = _make_station_df()
+
+    out = select_station_ids(df, id_col="station", prefix="15")
+    assert out == ["15001", "15002"]
+
+    out2 = select_station_ids(df, id_col="station", prefix=["15", "32"])
+    assert out2 == ["15001", "15002", "32010"]
 
 
-# ---------------------------------------------------------------------------
-# ensure_datetime_naive
-# ---------------------------------------------------------------------------
+def test_select_station_ids_station_ids_and_or_semantics():
+    df = _make_station_df()
 
-def test_ensure_datetime_naive_parses_and_drops_tz():
-    s = pd.Series(
-        [
-            "2020-01-01",
-            pd.Timestamp("2020-01-02", tz="UTC"),
-            "not-a-date",
-        ]
-    )
-
-    out = ensure_datetime_naive(s)
-
-    # Debe ser datetime64[ns] sin tz
-    assert pd.api.types.is_datetime64_ns_dtype(out)
-    # La fila 0 debe ser 2020-01-01
-    assert out.iloc[0] == pd.Timestamp("2020-01-01")
-    # La fila 1 debe ser 2020-01-02 (sin tz)
-    assert out.iloc[1] == pd.Timestamp("2020-01-02")
-    # La fila 2 debe ser NaT
-    assert pd.isna(out.iloc[2])
-
-
-# ---------------------------------------------------------------------------
-# add_calendar_features
-# ---------------------------------------------------------------------------
-
-def test_add_calendar_features_basic():
-    df = pd.DataFrame({"date": ["2020-01-01", "2020-02-15"]})
-    out = add_calendar_features(df, date_col="date", add_cyclic=False)
-
-    for c in ["year", "month", "doy"]:
-        assert c in out.columns
-
-    assert list(out["year"]) == [2020, 2020]
-    assert list(out["month"]) == [1, 2]
-    # doy numéricamente correcto
-    assert int(out.loc[0, "doy"]) == 1
-    assert int(out.loc[1, "doy"]) == 46  # 15 feb 2020
-
-
-def test_add_calendar_features_with_cyclic():
-    df = pd.DataFrame({"date": ["2020-01-01", "2020-06-30"]})
-    out = add_calendar_features(df, date_col="date", add_cyclic=True)
-
-    for c in ["year", "month", "doy", "doy_sin", "doy_cos"]:
-        assert c in out.columns
-
-    # Harmónicos deben ser numéricos sin NaN
-    assert np.isfinite(out["doy_sin"]).all()
-    assert np.isfinite(out["doy_cos"]).all()
-
-
-# ---------------------------------------------------------------------------
-# default_feature_names
-# ---------------------------------------------------------------------------
-
-def test_default_feature_names_no_cyclic():
-    feats = default_feature_names(lat_col="lat", lon_col="lon", alt_col="alt", add_cyclic=False)
-    assert feats == ["lat", "lon", "alt", "year", "month", "doy"]
-
-
-def test_default_feature_names_with_cyclic_and_extra():
-    feats = default_feature_names(
-        lat_col="LAT",
-        lon_col="LON",
-        alt_col="Z",
-        add_cyclic=True,
-        extra=["extra1", "doy", "extra2", "extra1"],
-    )
-    # Debe deduplicar manteniendo orden, y añadir sin/cos
-    assert feats == [
-        "LAT",
-        "LON",
-        "Z",
-        "year",
-        "month",
-        "doy",
-        "doy_sin",
-        "doy_cos",
-        "extra1",
-        "extra2",
-    ]
-
-
-# ---------------------------------------------------------------------------
-# preprocess_for_model
-# ---------------------------------------------------------------------------
-
-def test_preprocess_for_model_default_features_no_cyclic():
-    df = _make_simple_df()
-
-    prep, feats = preprocess_for_model(
+    out = select_station_ids(
         df,
         id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        start=None,
-        end=None,
-        add_cyclic=False,
-        feature_cols=None,
+        prefix="15",
+        station_ids=["99999"],
     )
-
-    # Feature list should be the default (no cyclic)
-    assert feats == ["lat", "lon", "alt", "year", "month", "doy"]
-
-    # Prepared df must contain base + calendar fields
-    for c in ["station", "date", "lat", "lon", "alt", "tmin", "year", "month", "doy"]:
-        assert c in prep.columns
-
-    # No cyclic columns
-    assert "doy_sin" not in prep.columns
-    assert "doy_cos" not in prep.columns
+    # union of prefix + explicit ids, ordered by first appearance in df
+    assert out == ["15001", "15002", "99999"]
 
 
-def test_preprocess_for_model_default_features_with_cyclic():
-    df = _make_simple_df()
+def test_select_station_ids_regex_and_custom_filter():
+    df = _make_station_df()
 
-    prep, feats = preprocess_for_model(
+    # regex for the "32..." station
+    out = select_station_ids(df, id_col="station", regex=r"^32")
+    assert out == ["32010"]
+
+    # custom_filter: keep stations whose numeric id is even
+    out2 = select_station_ids(
         df,
         id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        start=None,
-        end=None,
-        add_cyclic=True,
-        feature_cols=None,
+        custom_filter=lambda s: int(s) % 2 == 0,
     )
-
-    assert "doy_sin" in prep.columns
-    assert "doy_cos" in prep.columns
-
-    assert feats == ["lat", "lon", "alt", "year", "month", "doy", "doy_sin", "doy_cos"]
+    # 15002 and 32010 are even
+    assert out2 == ["15002", "32010"]
 
 
-def test_preprocess_for_model_with_custom_features():
-    df = _make_simple_df()
-    df["extra"] = [1, 2, 3, 4]
+def test_select_station_ids_fallback_to_all_if_no_match():
+    df = _make_station_df()
 
-    prep, feats = preprocess_for_model(
+    out = select_station_ids(df, id_col="station", prefix="00")  # no station starts with 00
+    # Should gracefully fall back to all stations
+    assert out == ["15001", "15002", "32010", "99999"]
+
+
+# --------------------------------------------------------------------------- #
+# filter_by_min_station_rows
+# --------------------------------------------------------------------------- #
+
+
+def test_filter_by_min_station_rows_counts_non_missing_only():
+    df = pd.DataFrame(
+        {
+            "station": ["A", "A", "A", "B", "B", "C"],
+            "value": [1.0, np.nan, 2.0, np.nan, np.nan, 5.0],
+        }
+    )
+    # Non-null counts: A -> 2, B -> 0, C -> 1
+
+    out2 = filter_by_min_station_rows(
         df,
         id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        start=None,
-        end=None,
-        add_cyclic=True,  # no debería afectar porque pasamos feature_cols
-        feature_cols=["lat", "lon", "alt", "extra"],
+        target_col="value",
+        min_station_rows=2,
     )
+    assert out2 == ["A"]
 
-    # Feature list is exactly what we passed (deduped, same order)
-    assert feats == ["lat", "lon", "alt", "extra"]
-
-    # Calendar fields should still be present in the prepared DataFrame
-    for col in ["year", "month", "doy"]:
-        assert col in prep.columns
-
-    # Extra debe estar presente
-    assert "extra" in prep.columns
-
-
-def test_preprocess_for_model_with_window_filter():
-    df = _make_simple_df()
-
-    prep, feats = preprocess_for_model(
+    out1 = filter_by_min_station_rows(
         df,
         id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        start="2020-01-02",
-        end="2020-01-02",
-        add_cyclic=False,
-        feature_cols=None,
+        target_col="value",
+        min_station_rows=1,
     )
+    # A and C meet the threshold; order is the natural station order
+    assert out1 == ["A", "C"]
 
-    # Sólo debe haber filas del 2 de enero de 2020
-    assert prep["date"].nunique() == 1
-    assert pd.to_datetime("2020-01-02") in prep["date"].unique()
-
-    # Features siguen siendo los mismos
-    assert feats == ["lat", "lon", "alt", "year", "month", "doy"]
-
-
-def test_preprocess_for_model_empty_after_window_returns_empty_df():
-    df = _make_simple_df()
-
-    prep, feats = preprocess_for_model(
+    out0 = filter_by_min_station_rows(
         df,
         id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="tmin",
-        start="2030-01-01",
-        end="2030-12-31",
-        add_cyclic=False,
-        feature_cols=None,
+        target_col="value",
+        min_station_rows=0,
     )
-
-    # No rows
-    assert prep.empty
-
-    # Column scaffold should at least contain the base + default feature columns
-    expected_feats = ["lat", "lon", "alt", "year", "month", "doy"]
-    for c in ["station", "date", "lat", "lon", "alt", "tmin"] + expected_feats:
-        assert c in prep.columns
-
-    # And feats must match the default
-    assert feats == expected_feats
+    # min_station_rows <= 0 => all stations
+    assert out0 == ["A", "B", "C"]
