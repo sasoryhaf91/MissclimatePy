@@ -3,150 +3,207 @@
 missclimatepy.impute
 ====================
 
-XYZT-based imputation of daily climate station records.
+Local XYZT-based imputation of daily climate station series.
 
-Public API
-----------
+This module implements a station-wise imputer that:
 
-- :func:`impute_dataset`: fill missing values (and missing *dates*) in a
-  long-format daily table, station by station.
+- uses only spatial coordinates (latitude, longitude, altitude) and
+  calendar-based features (year, month, day-of-year, optional cyclic
+  sin/cos) as predictors;
+- calibrates one local model per *target* station, using either all other
+  stations or only a K-nearest-neighbors pool;
+- optionally includes a fraction of the target station's observed rows
+  in the training pool (``include_target_pct``);
+- returns a **complete daily series** for each evaluated station over a
+  requested window, with a clear provenance flag for each value.
 
 Design
 ------
 
-* Features: latitude, longitude, altitude + calendar fields (year, month, doy)
-  and optional cyclic transforms of day-of-year.
-* Model: any regressor created by :func:`missclimatepy.models.make_model`
-  (Random Forest by default).
-* Training: for each **target station** we train one model using:
-    - all *other* stations, or
-    - only its K nearest neighbors (if a neighbor map is provided or
-      ``k_neighbors`` is given),
-    - plus an optional fraction of the target station's own observed rows
-      (``include_target_pct``).
-* Imputation: predictions are generated no sólo para filas con el target NaN,
-  sino también para **fechas que no existían** en el dataframe original:
-  primero se construye una malla diaria completa en el intervalo de análisis.
-* Output: tabla en formato largo que contiene **todos los días** en el periodo
-  solicitado, con:
+For each target station:
 
-    - observaciones originales intactas,
-    - huecos llenados cuando es posible,
-    - una columna ``source`` con valores ``"observed"`` o ``"imputed"``.
+1. Build a daily date grid:
 
-Las primeras columnas del resultado son siempre:
+   - If ``start`` / ``end`` are provided, use the global window
+     ``[start, end]``.
+   - Otherwise, use the station's own span
+     ``[min(date), max(date)]`` in the input data.
+
+2. Attach station coordinates (median lat/lon/alt over the input rows)
+   and derive calendar features.
+
+3. Define a training pool:
+
+   - If ``neighbor_map`` is provided, use the listed neighbors.
+   - Else if ``k_neighbors`` is provided, use a Haversine KNN map.
+   - Else, default to "all other stations".
+
+   The pool always requires non-null target and non-null feature values.
+
+4. Optionally leak a fraction ``include_target_pct`` of the target
+   station's own observed rows into the training pool.
+
+5. Train a model via :func:`missclimatepy.models.make_model` and
+   predict on the full date grid.
+
+6. Overwrite predicted values on dates where we have an original
+   observation from the input. These are flagged as ``source='observed'``,
+   whereas truly imputed values are flagged as ``source='imputed'``.
+
+If either:
+
+- the station has fewer than ``min_station_rows`` observed rows, or
+- the training pool is empty,
+
+then no model is trained and the station is *passed through*:
+
+- Observed dates keep their original value and ``source='observed'``;
+- Non-observed dates are returned as ``NaN`` with ``source='missing'``.
+
+Returned schema
+---------------
+
+The output is a long-format table with one row per
+(station, date) combination over the constructed grid:
 
     [id_col, lat_col, lon_col, alt_col, date_col, target_col, "source"]
+
+where:
+
+- ``source`` ∈ {"observed", "imputed", "missing"}.
+
+This function is intended for reconstruction / completion of station
+records; model evaluation and MDR-style experiments are handled by
+:mod:`missclimatepy.evaluate`.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
+try:  # optional UX dependency
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    def tqdm(x, **kwargs):
+        return x
+
 from .features import (
-    add_calendar_features,
     ensure_datetime_naive,
+    add_calendar_features,
     select_station_ids,
     validate_required_columns,
 )
-from .models import make_model
 from .neighbors import build_neighbor_map
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _default_features(
-    *,
-    lat_col: str,
-    lon_col: str,
-    alt_col: str,
-    add_cyclic: bool,
-) -> List[str]:
-    """Default list of feature columns for XYZT regression."""
-    feats = [lat_col, lon_col, alt_col, "year", "month", "doy"]
-    if add_cyclic:
-        feats += ["doy_sin", "doy_cos"]
-    return feats
-
-
-def _empty_output(
-    *,
-    id_col: str,
-    lat_col: str,
-    lon_col: str,
-    alt_col: str,
-    date_col: str,
-    target_col: str,
-) -> pd.DataFrame:
-    """Empty result with canonical columns."""
-    cols = [id_col, lat_col, lon_col, alt_col, date_col, target_col, "source"]
-    return pd.DataFrame(columns=cols)
-
-
-# ---------------------------------------------------------------------------
-# Public imputer
-# ---------------------------------------------------------------------------
+from .models import make_model
 
 
 def impute_dataset(
     data: pd.DataFrame,
     *,
-    # core schema
+    # column names (generic schema)
     id_col: str,
     date_col: str,
     lat_col: str,
     lon_col: str,
     alt_col: str,
     target_col: str,
-    # time window
+    # temporal window
     start: Optional[str] = None,
     end: Optional[str] = None,
     # feature configuration
     add_cyclic: bool = False,
     feature_cols: Optional[Sequence[str]] = None,
-    # station selection (OR semantics; default = all stations in `data`)
+    # selection of target stations
     prefix: Optional[Iterable[str]] = None,
-    station_ids: Optional[Iterable[Hashable]] = None,
+    station_ids: Optional[Iterable[Union[str, int]]] = None,
     regex: Optional[str] = None,
-    custom_filter: Optional[Any] = None,
-    # minimum information per target station (observed rows)
+    custom_filter: Optional[callable] = None,
+    # minimum information per station (controls whether we train a model)
     min_station_rows: Optional[int] = None,
     # neighborhood & leakage
     k_neighbors: Optional[int] = 20,
-    neighbor_map: Optional[Mapping[Hashable, Sequence[Hashable]]] = None,
+    neighbor_map: Optional[Dict[Union[str, int], List[Union[str, int]]]] = None,
     include_target_pct: float = 0.0,
     include_target_seed: int = 42,
     # model
     model_kind: str = "rf",
     model_params: Optional[Dict[str, Any]] = None,
-    # UX
+    # logging / UX
     show_progress: bool = False,
 ) -> pd.DataFrame:
     """
-    Impute missing values (and missing **dates**) in a long-format daily table.
+    Impute daily station series using a local XYZT model per station.
 
-    Para cada estación seleccionada:
+    Parameters
+    ----------
+    data : DataFrame
+        Long-format table with at least
+        (id_col, date_col, lat_col, lon_col, alt_col, target_col).
+    id_col, date_col, lat_col, lon_col, alt_col, target_col : str
+        Column names for station id, timestamp, coordinates and target.
+    start, end : str or None
+        Optional inclusive window for reconstruction. If provided, each
+        station's output spans the same [start, end] interval. If not
+        provided, each station spans [min(date), max(date)] in the input.
+    add_cyclic : bool
+        If True, add sin/cos transforms of day-of-year to the features.
+    feature_cols : sequence of str or None
+        Custom feature list. If None, defaults to
+        [lat, lon, alt, year, month, doy] (+ cyclic terms if requested).
+    prefix, station_ids, regex, custom_filter :
+        Optional filters to choose which stations to *impute* (OR semantics).
+        If none match, all stations in ``data`` are used.
+    min_station_rows : int or None
+        Minimum number of observed (non-NaN) target values a station must
+        have in the working window in order to train a model. Stations
+        below this threshold are passed through without imputation:
+        observed dates remain observed; other dates are returned as
+        ``NaN`` / ``source='missing'``.
+    k_neighbors : int or None
+        If provided and ``neighbor_map`` is None, a Haversine KNN map is
+        built on lat/lon and each station's training pool uses only its
+        neighbors (excluding itself).
+    neighbor_map : dict or None
+        Precomputed neighborhood map {station_id -> [neighbor_ids]}.
+        Overrides ``k_neighbors`` if given.
+    include_target_pct : float
+        Fraction (0..95) of the target station's own observed rows to
+        include in the training pool. A value of 0.0 prevents leakage
+        from the target station; a small positive value allows slight
+        local adaptation.
+    include_target_seed : int
+        Seed for the random sampler that chooses which target rows to
+        include when ``include_target_pct > 0``.
+    model_kind : str
+        Identifier passed to :func:`missclimatepy.models.make_model`
+        ("rf", "etr", "gbrt", "hgbt", "linreg", "ridge", "lasso",
+         "knn", "svr", "mlp", "xgb", ...).
+    model_params : dict or None
+        Hyperparameters forwarded to :func:`make_model`. Any missing
+        entries fall back to model-specific defaults.
+    show_progress : bool
+        If True, display a tqdm progress bar over stations and brief
+        diagnostic messages about imputation decisions.
 
-    1. Construye una serie diaria completa en el intervalo de análisis
-       (ya sea [start, end] o el rango mínimo–máximo en `data`).
-    2. Asigna sus coordenadas (lat, lon, alt) como la mediana por estación.
-    3. Entrena un modelo XYZT usando vecinos / todas las demás estaciones y
-       una fracción opcional de filas observadas de la estación objetivo.
-    4. Predice el target en todas las filas donde `target_col` está ausente.
-    5. Devuelve la serie diaria completa con la columna ``source`` indicando
-       si el valor es ``"observed"`` o ``"imputed"``.
+    Returns
+    -------
+    DataFrame
+        Long-format table with one row per (station, date) in the
+        constructed grid. Columns:
 
-    Las estaciones que no alcanzan `min_station_rows` se **devuelven tal cual**:
-    sus huecos siguen como NaN y `source="missing"`.
+        - ``id_col``        : station identifier,
+        - ``lat_col``       : latitude (median per station),
+        - ``lon_col``       : longitude (median per station),
+        - ``alt_col``       : altitude (median per station),
+        - ``date_col``      : daily timestamp,
+        - ``target_col``    : observed or imputed value (float),
+        - ``source``        : {"observed", "imputed", "missing"}.
     """
     # ------------------------------------------------------------------
-    # 1) Validación básica y ventana temporal
+    # 1. Basic validation & datetime handling
     # ------------------------------------------------------------------
     validate_required_columns(
         data,
@@ -156,41 +213,54 @@ def impute_dataset(
 
     df = data.copy()
     df[date_col] = ensure_datetime_naive(df[date_col])
+    df = df.dropna(subset=[date_col])
 
     if df.empty:
-        return _empty_output(
-            id_col=id_col,
-            lat_col=lat_col,
-            lon_col=lon_col,
-            alt_col=alt_col,
-            date_col=date_col,
-            target_col=target_col,
+        return pd.DataFrame(
+            columns=[id_col, lat_col, lon_col, alt_col, date_col, target_col, "source"]
         )
 
-    global_lo = df[date_col].min()
-    global_hi = df[date_col].max()
-    start_dt = pd.to_datetime(start) if start is not None else global_lo
-    end_dt = pd.to_datetime(end) if end is not None else global_hi
+    # Global window for clipping
+    if start or end:
+        lo = pd.to_datetime(start) if start else df[date_col].min()
+        hi = pd.to_datetime(end) if end else df[date_col].max()
+        df = df[(df[date_col] >= lo) & (df[date_col] <= hi)]
+    else:
+        lo = None
+        hi = None
 
-    df = df[(df[date_col] >= start_dt) & (df[date_col] <= end_dt)]
     if df.empty:
-        return _empty_output(
-            id_col=id_col,
-            lat_col=lat_col,
-            lon_col=lon_col,
-            alt_col=alt_col,
-            date_col=date_col,
-            target_col=target_col,
+        return pd.DataFrame(
+            columns=[id_col, lat_col, lon_col, alt_col, date_col, target_col, "source"]
         )
 
     # ------------------------------------------------------------------
-    # 2) Estaciones objetivo (para COBERTURA) y estaciones a imputar
+    # 2. Calendar features & feature list
     # ------------------------------------------------------------------
-    # Estaciones presentes en el dataframe
-    all_station_ids = df[id_col].dropna().unique().tolist()
+    df = add_calendar_features(df, date_col=date_col, add_cyclic=add_cyclic)
 
-    # Estaciones que el usuario quiere considerar (para cobertura + salida)
-    stations_eval = select_station_ids(
+    if feature_cols is None:
+        # Default XYZT feature set
+        feats: List[str] = [lat_col, lon_col, alt_col, "year", "month", "doy"]
+        if add_cyclic:
+            feats += ["doy_sin", "doy_cos"]
+    else:
+        feats = list(feature_cols)
+
+    # rows with valid features (for training)
+    valid_feat_mask = ~df[feats].isna().any(axis=1)
+    observed_mask_for_train = valid_feat_mask & df[target_col].notna()
+
+    # Station medoids for coordinates
+    medoids = (
+        df.groupby(id_col)[[lat_col, lon_col, alt_col]]
+        .median()
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Choose stations to impute
+    # ------------------------------------------------------------------
+    stations = select_station_ids(
         df,
         id_col=id_col,
         prefix=prefix,
@@ -198,238 +268,201 @@ def impute_dataset(
         regex=regex,
         custom_filter=custom_filter,
     )
-    # Asegurar que están en el dataset
-    station_set = set(all_station_ids)
-    stations_eval = [s for s in stations_eval if s in station_set]
-
-    if not stations_eval:
-        return _empty_output(
-            id_col=id_col,
-            lat_col=lat_col,
-            lon_col=lon_col,
-            alt_col=alt_col,
-            date_col=date_col,
-            target_col=target_col,
-        )
-
-    # Subconjunto que SÍ se intentará imputar (aplica min_station_rows)
-    if min_station_rows is not None:
-        obs_counts = (
-            df.loc[~df[target_col].isna(), [id_col, target_col]]
-            .groupby(id_col)[target_col]
-            .size()
-            .astype(int)
-        )
-        stations_impute = [
-            s for s in stations_eval if int(obs_counts.get(s, 0)) >= int(min_station_rows)
-        ]
-    else:
-        stations_impute = list(stations_eval)
 
     # ------------------------------------------------------------------
-    # 3) Expandir cada estación evaluada a una malla diaria completa
-    # ------------------------------------------------------------------
-    daily_index = pd.date_range(start_dt, end_dt, freq="D")
-
-    expanded_targets: List[pd.DataFrame] = []
-    for sid in stations_eval:
-        sub = df[df[id_col] == sid].copy()
-        if sub.empty:
-            # Aun si no hay registros, creamos la grilla diaria con coords NaN
-            base = pd.DataFrame(
-                {
-                    id_col: sid,
-                    date_col: daily_index,
-                    lat_col: np.nan,
-                    lon_col: np.nan,
-                    alt_col: np.nan,
-                }
-            )
-            expanded_targets.append(base)
-            continue
-
-        lat_med = float(sub[lat_col].median()) if sub[lat_col].notna().any() else np.nan
-        lon_med = float(sub[lon_col].median()) if sub[lon_col].notna().any() else np.nan
-        alt_med = float(sub[alt_col].median()) if sub[alt_col].notna().any() else np.nan
-
-        base = pd.DataFrame(
-            {
-                id_col: sid,
-                date_col: daily_index,
-                lat_col: lat_med,
-                lon_col: lon_med,
-                alt_col: alt_med,
-            }
-        )
-
-        other_cols = [
-            c
-            for c in sub.columns
-            if c not in (id_col, date_col, lat_col, lon_col, alt_col)
-        ]
-        if other_cols:
-            base = base.merge(
-                sub[[date_col] + other_cols],
-                on=date_col,
-                how="left",
-            )
-
-        expanded_targets.append(base)
-
-    df_targets = pd.concat(expanded_targets, ignore_index=True)
-
-    # Otras estaciones (no seleccionadas para cobertura) pueden seguir
-    # con su span nativo y sirven como pool de entrenamiento.
-    df_others = df[~df[id_col].isin(stations_eval)].copy()
-
-    if df_others.empty:
-        df_all = df_targets.copy()
-    else:
-        df_all = pd.concat([df_targets, df_others], ignore_index=True)
-
-    # ------------------------------------------------------------------
-    # 4) Añadir features temporales y decidir lista de features
-    # ------------------------------------------------------------------
-    df_all = add_calendar_features(df_all, date_col=date_col, add_cyclic=add_cyclic)
-
-    if feature_cols is None:
-        feats = _default_features(
-            lat_col=lat_col, lon_col=lon_col, alt_col=alt_col, add_cyclic=add_cyclic
-        )
-    else:
-        feats = list(feature_cols)
-
-    # ------------------------------------------------------------------
-    # 5) Mapa de vecinos
+    # 4. Neighbor map (if requested)
     # ------------------------------------------------------------------
     if neighbor_map is not None:
-        # Copia defensiva
-        nmap: Dict[Hashable, List[Hashable]] = {
-            sid: list(nei) for sid, nei in neighbor_map.items()
-        }
+        nmap = dict(neighbor_map)
+        used_k = None
     elif k_neighbors is not None:
         nmap = build_neighbor_map(
-            df_all,
+            df,
             id_col=id_col,
             lat_col=lat_col,
             lon_col=lon_col,
             k=int(k_neighbors),
             include_self=False,
         )
+        used_k = int(k_neighbors)
     else:
-        nmap = {}
+        nmap = None
+        used_k = None
 
     # ------------------------------------------------------------------
-    # 6) Máscaras globales (sobre df_all)
+    # 5. Iterate over stations and build complete series
     # ------------------------------------------------------------------
-    feat_ok = ~df_all[feats].isna().any(axis=1)
-    target = df_all[target_col]
-    target_na = target.isna()
+    rows_out: List[pd.DataFrame] = []
 
-    train_base_mask = feat_ok & (~target_na)  # filas observadas
-    missing_base_mask = feat_ok & target_na   # filas a imputar
+    iterator = tqdm(stations, desc="Imputing stations", unit="st") if show_progress else stations
 
-    idx_arr = df_all.index.to_numpy()
-    station_arr = df_all[id_col].to_numpy()
+    rng_leak = np.random.RandomState(int(include_target_seed))
 
-    # Salida: sólo estaciones evaluadas, con source inicial
-    df_out = df_all[df_all[id_col].isin(stations_eval)].copy()
-    df_out["source"] = np.where(df_out[target_col].isna(), "missing", "observed")
+    for sid in iterator:
+        st_mask = (df[id_col] == sid)
+        st_df = df.loc[st_mask].copy()
 
-    rng_global = np.random.RandomState(int(include_target_seed))
-
-    # ------------------------------------------------------------------
-    # 7) Bucle de imputación por estación
-    #     Sólo para estaciones que pasan `min_station_rows`
-    # ------------------------------------------------------------------
-    for sid in stations_impute:
-        is_station = (station_arr == sid)
-
-        miss_mask_sid = is_station & missing_base_mask
-        miss_idx = idx_arr[miss_mask_sid]
-        if miss_idx.size == 0:
+        if st_df.empty:
+            # No data at all for this station in the working window
             if show_progress:
-                print(f"[impute] Station {sid}: no rows to impute.")
+                tqdm.write(f"Station {sid}: no rows in window, skipped.")
             continue
 
-        # Pool base: filas observadas de *otras* estaciones
-        train_mask_sid = train_base_mask & (~is_station)
+        # Observed rows (for counting / leakage / overwriting)
+        st_obs = st_df.loc[st_df[target_col].notna(), [date_col, target_col]]
+        n_obs = int(len(st_obs))
 
-        # Restringir por neighbor_map si existe
-        if nmap:
-            neigh_ids = nmap.get(sid, None)
-            if neigh_ids is None:
-                # Sin entrada en el mapa -> usamos todas las demás estaciones
-                train_mask_sid = train_base_mask & (~is_station)
-            else:
-                neigh_ids = list(neigh_ids)
-                if len(neigh_ids) == 0:
-                    # Lista vacía -> SIN pool de entrenamiento (caso de test)
-                    train_mask_sid = np.zeros_like(train_mask_sid, dtype=bool)
-                else:
-                    train_mask_sid &= np.isin(station_arr, np.array(neigh_ids))
+        # Station-specific window:
+        if lo is not None or hi is not None:
+            # Global window [lo, hi] already applied to df
+            window_start = lo if lo is not None else st_df[date_col].min()
+            window_end = hi if hi is not None else st_df[date_col].max()
+        else:
+            window_start = st_df[date_col].min()
+            window_end = st_df[date_col].max()
 
-        # Inclusión opcional de filas observadas de la propia estación
-        if include_target_pct > 0.0:
-            pct = float(max(0.0, min(include_target_pct, 100.0)))
-            obs_mask_sid = is_station & train_base_mask
-            obs_idx = idx_arr[obs_mask_sid]
-            if obs_idx.size > 0 and pct > 0.0:
-                n_take = int(np.ceil(obs_idx.size * (pct / 100.0)))
-                n_take = max(1, min(n_take, obs_idx.size))
-                chosen_idx = rng_global.choice(obs_idx, size=n_take, replace=False)
-                train_mask_sid |= np.isin(idx_arr, chosen_idx)
-
-        train_idx = idx_arr[train_mask_sid]
-        if train_idx.size == 0:
+        if pd.isna(window_start) or pd.isna(window_end):
             if show_progress:
-                print(f"[impute] Station {sid}: empty training pool, skip.")
+                tqdm.write(f"Station {sid}: invalid date range, skipped.")
             continue
 
-        # Fit & predict
-        model = make_model(model_kind=model_kind, model_params=model_params or {})
+        grid_dates = pd.date_range(window_start, window_end, freq="D")
+        if grid_dates.empty:
+            if show_progress:
+                tqdm.write(f"Station {sid}: empty date grid, skipped.")
+            continue
 
-        X_train = df_all.loc[train_idx, feats].to_numpy()
-        y_train = df_all.loc[train_idx, target_col].to_numpy()
-        X_miss = df_all.loc[miss_idx, feats].to_numpy()
+        # Build grid and broadcast coordinates
+        grid = pd.DataFrame(
+            {
+                id_col: sid,
+                date_col: grid_dates,
+            }
+        )
 
-        model.fit(X_train, y_train)
-        y_hat = model.predict(X_miss)
+        if sid in medoids.index:
+            grid[lat_col] = float(medoids.loc[sid, lat_col])
+            grid[lon_col] = float(medoids.loc[sid, lon_col])
+            grid[alt_col] = float(medoids.loc[sid, alt_col])
+        else:
+            grid[lat_col] = np.nan
+            grid[lon_col] = np.nan
+            grid[alt_col] = np.nan
 
-        # Mapear predicciones en df_out para esta estación
-        mask_out_sid = (df_out[id_col] == sid) & df_out[target_col].isna()
+        # Calendar features for the grid
+        grid = add_calendar_features(grid, date_col=date_col, add_cyclic=add_cyclic)
 
-        # Alinear longitudes por seguridad
-        if mask_out_sid.sum() != len(y_hat):
-            idx_out_sid = df_out.index[mask_out_sid]
-            common_idx = np.intersect1d(idx_out_sid.to_numpy(), miss_idx)
-            if common_idx.size == 0:
-                continue
-            X_miss = df_all.loc[common_idx, feats].to_numpy()
-            y_hat = model.predict(X_miss)
-            mask_out_sid = df_out.index.isin(common_idx)
+        # ------------------------------------------------------------------
+        # Training pool for this station
+        # ------------------------------------------------------------------
+        # Base pool: neighbors or all-other stations (excluding target)
+        if nmap is not None:
+            neigh_ids = nmap.get(sid, [])
+            train_base_mask = df[id_col].isin(neigh_ids) & observed_mask_for_train
+        else:
+            train_base_mask = (~st_mask) & observed_mask_for_train
 
-        df_out.loc[mask_out_sid, target_col] = y_hat
-        df_out.loc[mask_out_sid, "source"] = "imputed"
+        train_pool = df.loc[train_base_mask, feats + [target_col]]
 
-        if show_progress:
-            n_imp = int(mask_out_sid.sum())
-            print(
-                f"[impute] Station {sid}: "
-                f"train={train_idx.size:,}  imputed_rows={n_imp:,}"
+        # Optional leakage from target station
+        train_df = train_pool
+
+        pct = max(0.0, min(float(include_target_pct), 95.0))
+        if pct > 0.0 and n_obs > 0:
+            st_obs_full = df.loc[
+                st_mask & observed_mask_for_train,
+                feats + [target_col],
+            ]
+            if not st_obs_full.empty:
+                n_total = int(len(st_obs_full))
+                n_take = int(np.ceil(n_total * (pct / 100.0)))
+                n_take = max(1, min(n_take, n_total))
+                chosen_idx = rng_leak.choice(
+                    st_obs_full.index.to_numpy(),
+                    size=n_take,
+                    replace=False,
+                )
+                leak_df = st_obs_full.loc[chosen_idx, feats + [target_col]]
+                train_df = pd.concat([train_pool, leak_df], axis=0, copy=False)
+
+        # Decide whether to impute or pass-through
+        do_impute = True
+        if min_station_rows is not None and n_obs < int(min_station_rows):
+            do_impute = False
+            if show_progress:
+                tqdm.write(
+                    f"Station {sid}: n_obs={n_obs} < min_station_rows={int(min_station_rows)} "
+                    f"-> no model, pass-through."
+                )
+        if train_df.empty:
+            do_impute = False
+            if show_progress:
+                tqdm.write(
+                    f"Station {sid}: empty training pool "
+                    f"(neighbors={used_k if used_k is not None else 'all/none'}) "
+                    f"-> no model, pass-through."
+                )
+
+        # ------------------------------------------------------------------
+        # Imputation / pass-through
+        # ------------------------------------------------------------------
+        # Initialize container arrays
+        n_grid = len(grid)
+        values = np.full(n_grid, np.nan, dtype=float)
+        source = np.full(n_grid, "missing", dtype=object)
+
+        # Observed-by-date mapping (always applied)
+        if not st_obs.empty:
+            # unique by date; last occurrence wins if duplicated
+            obs_series = (
+                st_obs.dropna(subset=[target_col])
+                .drop_duplicates(subset=[date_col], keep="last")
+                .set_index(date_col)[target_col]
             )
+            observed_dates = obs_series.index
+            is_observed = grid[date_col].isin(observed_dates)
+            if is_observed.any():
+                mapped = grid.loc[is_observed, date_col].map(obs_series)
+                values[is_observed.to_numpy()] = mapped.to_numpy()
+                source[is_observed.to_numpy()] = "observed"
 
-    # ------------------------------------------------------------------
-    # 8) Reordenar columnas y ordenar por estación/fecha
-    # ------------------------------------------------------------------
-    leading_cols = [id_col, lat_col, lon_col, alt_col, date_col, target_col, "source"]
-    leading_cols = [c for c in leading_cols if c in df_out.columns]
-    other_cols = [c for c in df_out.columns if c not in leading_cols]
+        # If we decided to impute, fill remaining positions
+        if do_impute:
+            model = make_model(model_kind=model_kind, model_params=model_params)
+            X_train = train_df[feats].to_numpy(copy=False)
+            y_train = train_df[target_col].to_numpy(copy=False)
+            X_grid = grid[feats].to_numpy(copy=False)
 
-    df_out = df_out[leading_cols + other_cols]
-    df_out = df_out.sort_values([id_col, date_col]).reset_index(drop=True)
+            if X_train.size > 0:
+                model.fit(X_train, y_train)
+                y_hat = model.predict(X_grid).astype(float)
 
-    return df_out
+                # Only overwrite positions that are not already observed
+                is_not_observed = (source != "observed")
+                values[is_not_observed] = y_hat[is_not_observed]
+                source[is_not_observed] = "imputed"
+
+        # Attach to grid and keep only public columns
+        grid[target_col] = values
+        grid["source"] = source
+
+        cols_out = [id_col, lat_col, lon_col, alt_col, date_col, target_col, "source"]
+        rows_out.append(grid[cols_out].copy())
+
+    if not rows_out:
+        return pd.DataFrame(
+            columns=[id_col, lat_col, lon_col, alt_col, date_col, target_col, "source"]
+        )
+
+    out = pd.concat(rows_out, axis=0, ignore_index=True)
+
+    # Sort for usability
+    out = out.sort_values(by=[id_col, date_col]).reset_index(drop=True)
+
+    return out
 
 
-__all__ = ["impute_dataset"]
+__all__ = [
+    "impute_dataset",
+]
+

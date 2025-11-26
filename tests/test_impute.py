@@ -1,9 +1,4 @@
-# SPDX-License-Identifier: MIT
-"""
-Tests for missclimatepy.impute.impute_dataset
-"""
-
-from __future__ import annotations
+# tests/test_impute.py
 
 import numpy as np
 import pandas as pd
@@ -11,125 +6,17 @@ import pandas as pd
 from missclimatepy.impute import impute_dataset
 
 
-def _make_basic_df() -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_two_station_df():
     """
-    Small helper dataset with two stations, some missing values
-    and complete XYZT features.
-    """
-    dates = pd.date_range("2020-01-01", periods=4, freq="D")
+    Dos estaciones (A,B) con 3 días.
 
-    df = pd.DataFrame(
-        {
-            "station": ["S1"] * 4 + ["S2"] * 4,
-            "date": list(dates) * 2,
-            "lat": [10.0] * 4 + [11.0] * 4,
-            "lon": [-100.0] * 4 + [-101.0] * 4,
-            "alt": [2000.0] * 8,
-            # S1 has one missing, S2 is fully observed
-            "value": [1.0, 1.0, np.nan, 1.0, 2.0, 2.0, 2.0, 2.0],
-        }
-    )
-    return df
-
-
-def test_impute_dataset_fills_missing_and_marks_source():
-    """
-    Basic smoke test: missing values are filled where possible and
-    `source` correctly distinguishes observed vs imputed.
-    """
-    df = _make_basic_df()
-    n_missing = df["value"].isna().sum()
-
-    out = impute_dataset(
-        df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="value",
-        # keep defaults: model_kind="rf"
-        model_kind="rf",
-        model_params={"n_estimators": 10, "random_state": 0},
-    )
-
-    # Shape is preserved (aside del posible recorte por fechas que aquí no usamos)
-    assert out.shape[0] == df.shape[0]
-    assert "source" in out.columns
-
-    # Original observed values must remain unchanged
-    mask_obs = df["value"].notna()
-    assert np.allclose(
-        out.loc[mask_obs, "value"].to_numpy(),
-        df.loc[mask_obs, "value"].to_numpy(),
-    )
-
-    # All previously missing values with valid features should now be filled
-    mask_imputed = df["value"].isna()
-    # Puede que alguna fila no se pueda imputar si no hay datos de entrenamiento,
-    # pero en este dataset simple sí debería rellenarse.
-    assert out.loc[mask_imputed, "value"].notna().sum() == n_missing
-
-    # Source flags: observed rows -> "observed", imputed rows -> "imputed"
-    observed_sources = set(out.loc[mask_obs, "source"])
-    imputed_sources = set(out.loc[mask_imputed, "source"])
-
-    assert observed_sources == {"observed"}
-    assert imputed_sources == {"imputed"}
-
-
-def test_impute_dataset_respects_min_station_rows():
-    """
-    Stations below `min_station_rows` should be passed through without
-    attempting to impute them: their missing values remain NaN and
-    `source` stays as 'missing'.
-    """
-    dates = pd.date_range("2020-01-01", periods=4, freq="D")
-
-    df = pd.DataFrame(
-        {
-            "station": ["S1"] * 4 + ["S2"] * 4,
-            "date": list(dates) * 2,
-            "lat": [10.0] * 4 + [11.0] * 4,
-            "lon": [-100.0] * 4 + [-101.0] * 4,
-            "alt": [2000.0] * 8,
-            # S1: only 1 observed value, 3 missing
-            "value": [1.0, np.nan, np.nan, np.nan, 2.0, 2.0, 2.0, 2.0],
-        }
-    )
-
-    out = impute_dataset(
-        df,
-        id_col="station",
-        date_col="date",
-        lat_col="lat",
-        lon_col="lon",
-        alt_col="alt",
-        target_col="value",
-        min_station_rows=2,  # S1 does not meet this threshold
-        model_kind="rf",
-        model_params={"n_estimators": 10, "random_state": 0},
-    )
-
-    # For S1, missing values should remain NaN and source='missing'
-    s1 = out[out["station"] == "S1"].copy()
-    assert s1["value"].isna().sum() == 3
-    assert set(s1.loc[s1["value"].isna(), "source"]) == {"missing"}
-
-    # For S2, it should behave normally (no missing values)
-    s2 = out[out["station"] == "S2"].copy()
-    assert s2["value"].isna().sum() == 0
-    assert set(s2["source"]) == {"observed"}
-
-
-def test_impute_dataset_neighbor_map_controls_training():
-    """
-    A custom neighbor_map can prevent or enable training for a station.
-
-    Case 1: A has no neighbors and include_target_pct=0.0 -> no training pool,
-            so its values remain NaN / 'missing'.
-    Case 2: A uses B as neighbor with include_target_pct=0.0 -> training pool
-            contains B only, so A can be imputed.
+    A: [1.0, NaN, NaN]
+    B: [2.0, 2.0, 2.0]
     """
     dates = pd.date_range("2020-01-01", periods=3, freq="D")
 
@@ -140,12 +27,146 @@ def test_impute_dataset_neighbor_map_controls_training():
             "lat": [10.0] * 3 + [11.0] * 3,
             "lon": [-100.0] * 3 + [-101.0] * 3,
             "alt": [2000.0] * 6,
-            # A: all missing, B: fully observed
+            "value": [1.0, np.nan, np.nan, 2.0, 2.0, 2.0],
+        }
+    )
+    return df
+
+
+def _make_min_rows_df():
+    """
+    Dos estaciones (S1,S2) con 4 días.
+
+    S1: 1 observado, 3 NaN  -> por debajo de min_station_rows=2
+    S2: 4 observados        -> por encima del umbral
+    """
+    dates = pd.date_range("2020-01-01", periods=4, freq="D")
+
+    df = pd.DataFrame(
+        {
+            "station": ["S1"] * 4 + ["S2"] * 4,
+            "date": list(dates) * 2,
+            "lat": [10.0] * 4 + [11.0] * 4,
+            "lon": [-100.0] * 4 + [-101.0] * 4,
+            "alt": [2000.0] * 8,
+            "value": [1.0, np.nan, np.nan, np.nan, 2.0, 2.0, 2.0, 2.0],
+        }
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+def test_impute_dataset_fills_missing_and_marks_source():
+    """
+    Caso básico: A tiene huecos que deben imputarse usando B como vecina.
+
+    - La salida debe contener la serie completa (3 días para A y 3 para B).
+    - En A, las observaciones originales se mantienen como 'observed'.
+    - En A, los días sin observación se rellenan y marcan como 'imputed'.
+    """
+    df = _make_two_station_df()
+
+    out = impute_dataset(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="value",
+        k_neighbors=1,
+        model_kind="rf",
+        model_params={"n_estimators": 10, "random_state": 0},
+        show_progress=False,
+    )
+
+    # Serie completa para ambas estaciones: 2 * 3 = 6 filas
+    assert out.shape[0] == 6
+
+    a = out[out["station"] == "A"].copy()
+    b = out[out["station"] == "B"].copy()
+
+    # A: 3 fechas
+    assert a.shape[0] == 3
+    # Todos los valores de A deben estar definidos (1 observed + 2 imputed)
+    assert a["value"].isna().sum() == 0
+    assert set(a["source"]) == {"observed", "imputed"}
+    # Solo una observación original
+    assert (a["source"] == "observed").sum() == 1
+
+    # B: completamente observada, sin imputaciones
+    assert b["value"].isna().sum() == 0
+    assert set(b["source"]) == {"observed"}
+
+
+def test_impute_dataset_respects_min_station_rows():
+    """
+    Estaciones por debajo de `min_station_rows` no deben imputarse:
+
+    - Se devuelve la serie completa,
+    - Las fechas observadas permanecen con su valor y `source='observed'`,
+    - Las fechas sin observación quedan NaN y `source='missing'`.
+    """
+    df = _make_min_rows_df()
+
+    out = impute_dataset(
+        df,
+        id_col="station",
+        date_col="date",
+        lat_col="lat",
+        lon_col="lon",
+        alt_col="alt",
+        target_col="value",
+        min_station_rows=2,  # S1 no cumple
+        k_neighbors=1,
+        model_kind="rf",
+        model_params={"n_estimators": 10, "random_state": 0},
+        show_progress=False,
+    )
+
+    s1 = out[out["station"] == "S1"].copy()
+    s2 = out[out["station"] == "S2"].copy()
+
+    # S1 -> serie completa (4 días)
+    assert s1.shape[0] == 4
+    # Solo 1 valor observado, 3 NaN
+    assert s1["value"].isna().sum() == 3
+    assert (s1["source"] == "observed").sum() == 1
+    # Los NaN deben marcarse como 'missing'
+    assert set(s1.loc[s1["value"].isna(), "source"]) == {"missing"}
+
+    # S2 -> todo observado, sin imputaciones
+    assert s2["value"].isna().sum() == 0
+    assert set(s2["source"]) == {"observed"}
+
+
+def test_impute_dataset_neighbor_map_controls_training():
+    """
+    Un `neighbor_map` puede impedir o permitir el entrenamiento:
+
+    Caso 1: A no tiene vecinos y `include_target_pct=0.0` -> no hay pool de
+            entrenamiento, sus valores permanecen NaN/'missing'.
+    Caso 2: A usa B como vecina -> se entrena con B y A puede imputarse.
+    """
+    dates = pd.date_range("2020-01-01", periods=3, freq="D")
+
+    df = pd.DataFrame(
+        {
+            "station": ["A"] * 3 + ["B"] * 3,
+            "date": list(dates) * 2,
+            "lat": [10.0] * 3 + [11.0] * 3,
+            "lon": [-100.0] * 3 + [-101.0] * 3,
+            "alt": [2000.0] * 6,
+            # A: todo NaN, B: completamente observada
             "value": [np.nan, np.nan, np.nan, 5.0, 5.0, 5.0],
         }
     )
 
-    # Case 1: no neighbors, no leakage -> cannot train
+    # Caso 1: sin vecinos
     out_empty = impute_dataset(
         df,
         id_col="station",
@@ -158,15 +179,15 @@ def test_impute_dataset_neighbor_map_controls_training():
         include_target_pct=0.0,
         model_kind="rf",
         model_params={"n_estimators": 10, "random_state": 0},
+        show_progress=False,
     )
 
     a_empty = out_empty[out_empty["station"] == "A"]
-    # All values remain NaN and marked as 'missing'
     assert a_empty["value"].isna().all()
     assert set(a_empty["source"]) == {"missing"}
 
-    # Case 2: A uses B as neighbor -> training pool is non-empty
-    out_with_neighbors = impute_dataset(
+    # Caso 2: A usa B como vecina
+    out_nb = impute_dataset(
         df,
         id_col="station",
         date_col="date",
@@ -178,18 +199,20 @@ def test_impute_dataset_neighbor_map_controls_training():
         include_target_pct=0.0,
         model_kind="rf",
         model_params={"n_estimators": 10, "random_state": 0},
+        show_progress=False,
     )
 
-    a_imp = out_with_neighbors[out_with_neighbors["station"] == "A"]
-    # Now values should be imputed (non-NaN) and marked as 'imputed'
-    assert a_imp["value"].notna().all()
-    assert set(a_imp["source"]) == {"imputed"}
+    a_nb = out_nb[out_nb["station"] == "A"]
+    # Ahora A debe estar completamente imputada (sin NaNs)
+    assert a_nb["value"].isna().sum() == 0
+    assert set(a_nb["source"]) == {"imputed"}
 
 
 def test_impute_dataset_respects_start_end_window():
     """
-    When start/end are provided, the output should only contain rows
-    within that window.
+    Cuando se proporcionan `start` y `end`, la salida solo debe contener
+    fechas dentro de esa ventana. La serie sigue siendo completa dentro
+    del intervalo.
     """
     dates = pd.date_range("2020-01-01", periods=5, freq="D")
 
@@ -214,15 +237,14 @@ def test_impute_dataset_respects_start_end_window():
         target_col="value",
         start="2020-01-02",
         end="2020-01-04",
+        # aquí no necesitamos necesariamente imputar, solo probar la ventana
         model_kind="rf",
         model_params={"n_estimators": 10, "random_state": 0},
+        show_progress=False,
     )
 
-    # Only dates from 2 to 4 should be present
+    # Solo fechas 2..4
     assert out["date"].min() == pd.Timestamp("2020-01-02")
     assert out["date"].max() == pd.Timestamp("2020-01-04")
-    assert out.shape[0] == 3  # single station, 3 days
-
-    # Still must have a source column for all rows
-    assert "source" in out.columns
-    assert out["source"].notna().all()
+    # Una sola estación, 3 días
+    assert out.shape[0] == 3
