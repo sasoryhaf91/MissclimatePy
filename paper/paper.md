@@ -31,7 +31,7 @@ affiliations:
     index: 3
   - name: "CIMMYT, México"
     index: 4
-date: 2025-11-16
+date: 12/01/2025
 bibliography: paper.bib
 ---
 
@@ -58,49 +58,39 @@ The core station-wise evaluation protocol is implemented in `evaluate_stations` 
 
 Local imputation of a single target variable is handled by `impute_dataset` (module `impute`). For each selected station, it trains a `RandomForestRegressor` using neighbouring stations (or all others) plus an optional fraction of its own observed history. A full daily grid is created over the requested window, predictions are generated for all days, and observed values are preserved whenever available. The function returns a tidy table with exactly `[station, date, latitude, longitude, altitude, <target>, source]`, where `source` is `"observed"` or `"imputed"`, and can save results to CSV or Parquet, optionally partitioned by station.
 
-Diagnostics are provided by `metrics`, `masking`, and `viz`. Metrics include mean absolute error (MAE), root mean square error (RMSE), coefficient of determination ($R^2$), and Kling–Gupta efficiency (KGE). Masking helpers compute percentage-missing profiles and gap statistics, build station × date missingness matrices, and generate deterministic masking scenarios for controlled experiments. Visualisation helpers produce missingness matrices, metric distributions, parity plots, time-series overlays, spatial performance maps, gap histograms, and imputation coverage charts, all returning matplotlib `Axes` objects. A thin `api` layer exposes convenience wrappers (`evaluate_xyzt`, `impute_xyzt`, `build_neighbor_map`) that forward to these core routines. MissClimatePy depends only on `numpy`, `pandas`, `scikit-learn`, and `matplotlib`.
+Diagnostics are provided by `metrics`, `masking`, and `viz`. Metrics include mean absolute error (MAE), root mean square error (RMSE), coefficient of determination ($R^2$), and Kling–Gupta efficiency (KGE). Masking helpers compute percentage-missing profiles and gap statistics, build station × date missingness matrices, and generate deterministic masking scenarios for controlled experiments. Visualisation helpers produce missingness matrices, metric distributions, parity plots, time-series overlays, spatial performance maps, gap histograms, and imputation coverage charts, all returning matplotlib `Axes` objects. MissClimatePy depends only on `numpy`, `pandas`, `scikit-learn`, and `matplotlib`.
 
 
 ## Example
 
-The following snippet illustrates a typical workflow using an open Zenodo dataset of daily SMN stations in Mexico [@AntonioFernandez2025SMN]. MissClimatePy uses only coordinates and calendar information; other columns are ignored.
+The following snippet illustrates a typical workflow using an open Zenodo dataset of daily SMN stations in Mexico [@AntonioFernandez2025SMN]. In this example, MissClimatePy imputes the stations located in the State of Mexico using only coordinates and calendar information; all other columns are ignored.
 
 ```python
 import pandas as pd
-from missclimatepy.api import evaluate_xyzt, impute_xyzt
+import matplotlib.pyplot as plt
+from missclimatepy.impute import impute_dataset as impute
+from missclimatepy.viz import plot_imputed_series as pis
 
-url = "https://zenodo.org/records/17636066/files/smn_mx_daily_1991_2020.csv?download=1"
+url = "https://zenodo.org/records/17636066/files/smn_mx_daily_1991_2020.csv"
 df = pd.read_csv(url, parse_dates=["date"])
 
-report, preds = evaluate_xyzt(
-    df,
-    id_col="station",
-    date_col="date",
-    lat_col="lat",
-    lon_col="lon",
-    alt_col="alt",
-    target_col="tmin",
-    start="1991-01-01",
-    end="2020-12-31",
-    model_kind="rf",
-    model_params={"n_estimators": 300, "random_state": 42, "n_jobs": -1},
+tmin_imputed = impute(
+    df, id_col="station", date_col="date",
+    lat_col="latitude", lon_col="longitude", alt_col="altitude",
+    target_col="tmin", start="1991-01-01", end="2020-12-31",
+    prefix = ["15"], model_kind="rf", 
+    model_params={"n_estimators": 15, "random_state": 42, "n_jobs": -1},
 )
 
-imputed = impute_xyzt(
-    df,
-    id_col="station",
-    date_col="date",
-    lat_col="lat",
-    lon_col="lon",
-    alt_col="alt",
-    target_col="tmin",
-    start="1991-01-01",
-    end="2020-12-31",
-    k_neighbors=20,
-    include_target_pct=50.0,
-    min_station_rows=365,
+ax = pis(
+    df=tmin_imputed,station=15017, id_col="station", 
+    date_col="date", target_col="tmin", source_col="source",
+    title="Minimum temperature imputed – station 15017",
 )
+
+plt.show()
 ```
+![Example of daily minimum temperature reconstruction for station 15017 (State of Mexico). Original observations are preserved, gaps are filled by the XYZT Random Forest model, and the `source` flag differentiates observed vs imputed days.](figures/imputed_tmin_15017.png){#fig-imputed-series}
 
 # Related Work
 
