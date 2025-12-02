@@ -1,8 +1,41 @@
+site_name: MissClimatePy
+site_description: "Spatial–temporal imputation for daily climate station records in Python"
+site_author: "Hugo Antonio Fernández"
+site_url: "https://sasoryhaf91.github.io/MissclimatePy"
 
-site_name: MissclimatePy
+repo_url: "https://github.com/sasoryhaf91/MissclimatePy"
+repo_name: "sasoryhaf91/MissclimatePy"
+
 theme:
   name: material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.tracking
+    - toc.integrate
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - scheme: default
+      primary: teal
+      accent: deep orange
+
 nav:
   - Home: index.md
-  - API: api.md
-repo_url: https://github.com/youruser/missclimatepy
+  - Getting started: getting_started.md
+  - API reference: api.md
+  - MDR protocol: mdr_protocol.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - codehilite:
+      guess_lang: false
+  - footnotes
+  - tables
+  - fenced_code
+
+plugins:
+  - search
