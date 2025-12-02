@@ -1,0 +1,884 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Spatial–temporal imputation for daily climate station records in Python">
+      
+      
+        <meta name="author" content="Hugo Antonio Fernández">
+      
+      
+        <link rel="canonical" href="https://sasoryhaf91.github.io/MissclimatePy/mdr_protocol/">
+      
+      
+        <link rel="prev" href="../api/">
+      
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.22">
+    
+    
+      
+        <title>MDR protocol - MissClimatePy</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.84d31ad4.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#minimum-data-requirement-mdr-protocol-with-missclimatepy" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MissClimatePy" class="md-header__button md-logo" aria-label="MissClimatePy" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MissClimatePy
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              MDR protocol
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-orange"  aria-hidden="true"  type="radio" name="__palette" id="__palette_0">
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/sasoryhaf91/MissclimatePy" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sasoryhaf91/MissclimatePy
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MissClimatePy" class="md-nav__button md-logo" aria-label="MissClimatePy" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MissClimatePy
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/sasoryhaf91/MissclimatePy" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sasoryhaf91/MissclimatePy
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Home
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Getting started
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    API reference
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    MDR protocol
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    MDR protocol
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-data-assumptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      1. Data assumptions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-step-1-describe-missingness-and-select-stations" class="md-nav__link">
+    <span class="md-ellipsis">
+      2. Step 1 – Describe missingness and select stations
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-step-2-build-spatial-neighbors-optional-but-recommended" class="md-nav__link">
+    <span class="md-ellipsis">
+      3. Step 2 – Build spatial neighbors (optional but recommended)
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-step-3-station-wise-mdr-experiments-with-evaluate_stations" class="md-nav__link">
+    <span class="md-ellipsis">
+      4. Step 3 – Station-wise MDR experiments with evaluate_stations
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-step-4-summarize-mdr-curves" class="md-nav__link">
+    <span class="md-ellipsis">
+      5. Step 4 – Summarize MDR curves
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-step-5-visual-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      6. Step 5 – Visual diagnostics
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Step 5 – Visual diagnostics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-metric-distributions" class="md-nav__link">
+    <span class="md-ellipsis">
+      6.1 Metric distributions
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-spatial-patterns-of-performance" class="md-nav__link">
+    <span class="md-ellipsis">
+      6.2 Spatial patterns of performance
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#63-time-series-overlays-or-imputed-series" class="md-nav__link">
+    <span class="md-ellipsis">
+      6.3 Time-series overlays or imputed series
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-interpreting-mdr-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      7. Interpreting MDR results
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-reproducibility-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      8. Reproducibility notes
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/sasoryhaf91/MissclimatePy/edit/master/docs/mdr_protocol.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="minimum-data-requirement-mdr-protocol-with-missclimatepy">Minimum Data Requirement (MDR) protocol with MissClimatePy<a class="headerlink" href="#minimum-data-requirement-mdr-protocol-with-missclimatepy" title="Permanent link">&para;</a></h1>
+<p>This document describes a practical protocol for <strong>Minimum Data Requirement (MDR)</strong> experiments using <code>MissClimatePy</code>. The goal is to quantify <strong>how much local station history is needed</strong> (in percentage of observed days) for the XYZT Random Forest models to deliver acceptable interpolation / reconstruction performance.</p>
+<p>The workflow is fully reproducible and based on:</p>
+<ul>
+<li>A long-format daily station dataset.</li>
+<li>The station-wise evaluator <code>evaluate_stations</code>.</li>
+<li>The missing-data tools in <code>masking</code>.</li>
+<li>The neighbor utilities in <code>neighbors</code>.</li>
+<li>Standard metrics (MAE, RMSE, R², KGE) computed per station.</li>
+</ul>
+<p>The protocol is agnostic to the country or network; here we use “precipitation” (<code>prec</code>) or “minimum temperature” (<code>tmin</code>) as examples, but any continuous daily variable is compatible.</p>
+<hr />
+<h2 id="1-data-assumptions">1. Data assumptions<a class="headerlink" href="#1-data-assumptions" title="Permanent link">&para;</a></h2>
+<p>MissClimatePy expects a <strong>long-format</strong> daily table with at least:</p>
+<ul>
+<li><code>station</code> – station identifier (string or integer)</li>
+<li><code>date</code> – daily timestamp (datetime-like)</li>
+<li><code>latitude</code> – decimal degrees</li>
+<li><code>longitude</code> – decimal degrees</li>
+<li><code>altitude</code> – meters above sea level</li>
+<li><code>&lt;target&gt;</code> – variable to analyze (e.g. <code>prec</code>, <code>tmin</code>, <code>tmax</code>, <code>evap</code>)</li>
+</ul>
+<p>You are free to choose the column names; they are passed explicitly to the functions.</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+
+<span class="n">url</span> <span class="o">=</span> <span class="s2">&quot;https://zenodo.org/records/17636066/files/smn_mx_daily_1991_2020.csv&quot;</span>
+<span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">parse_dates</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;date&quot;</span><span class="p">])</span>
+
+<span class="n">df</span><span class="o">.</span><span class="n">head</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Typical MDR experiments will:</p>
+<ul>
+<li>Fix a <strong>time window</strong>, e.g. 1991-01-01 to 2020-12-31.</li>
+<li>Focus on a <strong>single target variable</strong> (e.g. <code>prec</code> or <code>tmin</code>).</li>
+<li>Optionally restrict to a <strong>region or subset of stations</strong> (e.g. by ID prefix).</li>
+</ul>
+<hr />
+<h2 id="2-step-1-describe-missingness-and-select-stations">2. Step 1 – Describe missingness and select stations<a class="headerlink" href="#2-step-1-describe-missingness-and-select-stations" title="Permanent link">&para;</a></h2>
+<p>Before running MDR experiments, we recommend:</p>
+<ol>
+<li><strong>Describing coverage</strong> (percentage of missing values per station).</li>
+<li><strong>Describing gap structure</strong> (number and length of consecutive gaps).</li>
+<li><strong>Filtering stations</strong> to ensure a reasonable minimum number of observed days.</li>
+</ol>
+<p>All of this is handled by <code>missclimatepy.masking</code>.</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">missclimatepy</span><span class="w"> </span><span class="kn">import</span> <span class="n">masking</span>
+
+<span class="n">START</span> <span class="o">=</span> <span class="s2">&quot;1991-01-01&quot;</span>
+<span class="n">END</span>   <span class="o">=</span> <span class="s2">&quot;2020-12-31&quot;</span>
+<span class="n">TARGET</span> <span class="o">=</span> <span class="s2">&quot;tmin&quot;</span>   <span class="c1"># or &quot;prec&quot;, &quot;tmax&quot;, &quot;evap&quot;</span>
+
+<span class="c1"># 2.1 Coverage: percentage of missing days per station</span>
+<span class="n">coverage</span> <span class="o">=</span> <span class="n">masking</span><span class="o">.</span><span class="n">percent_missing_between</span><span class="p">(</span>
+    <span class="n">df</span><span class="p">,</span>
+    <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+    <span class="n">date_col</span><span class="o">=</span><span class="s2">&quot;date&quot;</span><span class="p">,</span>
+    <span class="n">target_col</span><span class="o">=</span><span class="n">TARGET</span><span class="p">,</span>
+    <span class="n">start</span><span class="o">=</span><span class="n">START</span><span class="p">,</span>
+    <span class="n">end</span><span class="o">=</span><span class="n">END</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># 2.2 Gap profile</span>
+<span class="n">gaps</span> <span class="o">=</span> <span class="n">masking</span><span class="o">.</span><span class="n">gap_profile_by_station</span><span class="p">(</span>
+    <span class="n">df</span><span class="p">,</span>
+    <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+    <span class="n">date_col</span><span class="o">=</span><span class="s2">&quot;date&quot;</span><span class="p">,</span>
+    <span class="n">target_col</span><span class="o">=</span><span class="n">TARGET</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># 2.3 Combined descriptive summary</span>
+<span class="n">summary</span> <span class="o">=</span> <span class="n">masking</span><span class="o">.</span><span class="n">describe_missing</span><span class="p">(</span>
+    <span class="n">df</span><span class="p">,</span>
+    <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+    <span class="n">date_col</span><span class="o">=</span><span class="s2">&quot;date&quot;</span><span class="p">,</span>
+    <span class="n">target_col</span><span class="o">=</span><span class="n">TARGET</span><span class="p">,</span>
+    <span class="n">start</span><span class="o">=</span><span class="n">START</span><span class="p">,</span>
+    <span class="n">end</span><span class="o">=</span><span class="n">END</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">summary</span><span class="o">.</span><span class="n">head</span><span class="p">()</span>
+</code></pre></div>
+
+<p>From this summary you can define station filters, e.g.:</p>
+<ul>
+<li>Minimum percentage of <strong>observed</strong> days (e.g. ≥ 60 % coverage).</li>
+<li>Maximum tolerated <strong>maximum gap length</strong> (e.g. ≤ 365 days).</li>
+<li>Region filters (e.g. station IDs starting with <code>"15"</code> for State of Mexico).</li>
+</ul>
+<p>Example: stations with at least 25 full years of observations in 30 years:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="n">min_obs_days</span> <span class="o">=</span> <span class="mi">25</span> <span class="o">*</span> <span class="mi">365</span>  <span class="c1"># ~25 years</span>
+<span class="n">summary</span><span class="p">[</span><span class="s2">&quot;n_obs_days&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">-</span> <span class="n">summary</span><span class="p">[</span><span class="s2">&quot;pct_missing&quot;</span><span class="p">]</span> <span class="o">/</span> <span class="mf">100.0</span><span class="p">)</span> <span class="o">*</span> <span class="n">summary</span><span class="p">[</span><span class="s2">&quot;n_days&quot;</span><span class="p">]</span>
+<span class="n">good_stations</span> <span class="o">=</span> <span class="n">summary</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">summary</span><span class="p">[</span><span class="s2">&quot;n_obs_days&quot;</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="n">min_obs_days</span><span class="p">,</span> <span class="s2">&quot;station&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span>
+
+<span class="nb">len</span><span class="p">(</span><span class="n">good_stations</span><span class="p">)</span>
+</code></pre></div>
+
+<p>This station list can be passed to the evaluator as <code>station_ids=good_stations</code>.</p>
+<hr />
+<h2 id="3-step-2-build-spatial-neighbors-optional-but-recommended">3. Step 2 – Build spatial neighbors (optional but recommended)<a class="headerlink" href="#3-step-2-build-spatial-neighbors-optional-but-recommended" title="Permanent link">&para;</a></h2>
+<p>MDR experiments benefit from a controlled definition of <strong>spatial neighbors</strong>. MissClimatePy uses <strong>haversine distance</strong> on latitude/longitude and optionally stores altitude differences for diagnostics.</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">missclimatepy</span><span class="w"> </span><span class="kn">import</span> <span class="n">neighbors</span>
+
+<span class="c1"># One row per station with coordinates</span>
+<span class="n">meta</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">df</span><span class="p">[[</span><span class="s2">&quot;station&quot;</span><span class="p">,</span> <span class="s2">&quot;latitude&quot;</span><span class="p">,</span> <span class="s2">&quot;longitude&quot;</span><span class="p">,</span> <span class="s2">&quot;altitude&quot;</span><span class="p">]]</span>
+    <span class="o">.</span><span class="n">drop_duplicates</span><span class="p">(</span><span class="s2">&quot;station&quot;</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">reset_index</span><span class="p">(</span><span class="n">drop</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="p">)</span>
+
+<span class="c1"># Tidy table of k nearest neighbors</span>
+<span class="n">ndist</span> <span class="o">=</span> <span class="n">neighbors</span><span class="o">.</span><span class="n">neighbor_distances</span><span class="p">(</span>
+    <span class="n">meta</span><span class="p">,</span>
+    <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+    <span class="n">lat_col</span><span class="o">=</span><span class="s2">&quot;latitude&quot;</span><span class="p">,</span>
+    <span class="n">lon_col</span><span class="o">=</span><span class="s2">&quot;longitude&quot;</span><span class="p">,</span>
+    <span class="n">altitude_col</span><span class="o">=</span><span class="s2">&quot;altitude&quot;</span><span class="p">,</span>
+    <span class="n">k_neighbors</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+    <span class="n">max_radius_km</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>             <span class="c1"># or e.g. 150.0</span>
+    <span class="n">max_abs_altitude_diff</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>     <span class="c1"># or e.g. 800.0</span>
+    <span class="n">include_self</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Mapping: station -&gt; list of neighbor IDs</span>
+<span class="n">neighbor_map</span> <span class="o">=</span> <span class="n">neighbors</span><span class="o">.</span><span class="n">build_neighbor_map</span><span class="p">(</span>
+    <span class="n">meta</span><span class="p">,</span>
+    <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+    <span class="n">lat_col</span><span class="o">=</span><span class="s2">&quot;latitude&quot;</span><span class="p">,</span>
+    <span class="n">lon_col</span><span class="o">=</span><span class="s2">&quot;longitude&quot;</span><span class="p">,</span>
+    <span class="n">altitude_col</span><span class="o">=</span><span class="s2">&quot;altitude&quot;</span><span class="p">,</span>
+    <span class="n">k_neighbors</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="nb">len</span><span class="p">(</span><span class="n">neighbor_map</span><span class="p">)</span>
+</code></pre></div>
+
+<p>You can either:</p>
+<ul>
+<li>Pass <code>k_neighbors=20</code> directly to <code>evaluate_stations</code> (let it build the map).</li>
+<li>Or pass <code>neighbor_map=neighbor_map</code> for explicit control and reproducibility.</li>
+</ul>
+<hr />
+<h2 id="4-step-3-station-wise-mdr-experiments-with-evaluate_stations">4. Step 3 – Station-wise MDR experiments with <code>evaluate_stations</code><a class="headerlink" href="#4-step-3-station-wise-mdr-experiments-with-evaluate_stations" title="Permanent link">&para;</a></h2>
+<p>The MDR protocol is based on <strong>varying the fraction of the target station’s own history</strong> included in the training set, via <code>include_target_pct</code>.</p>
+<p>Intuition:</p>
+<ul>
+<li><code>include_target_pct = 0.0</code>: <strong>strict interpolation</strong> (LOSO-like). The station is never seen in training; only neighbors contribute.</li>
+<li>Higher values: <strong>local adaptation</strong>. A stratified fraction (month × dry/wet for precipitation) of the station’s observed history is allowed into training, simulating different Minimum Data Requirements.</li>
+</ul>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">missclimatepy</span><span class="w"> </span><span class="kn">import</span> <span class="n">evaluate_stations</span>
+
+<span class="n">mdr_grid</span> <span class="o">=</span> <span class="p">[</span><span class="mf">0.0</span><span class="p">,</span> <span class="mf">4.0</span><span class="p">,</span> <span class="mf">8.0</span><span class="p">,</span> <span class="mf">16.0</span><span class="p">,</span> <span class="mf">20.0</span><span class="p">,</span> <span class="mf">40.0</span><span class="p">,</span> <span class="mf">60.0</span><span class="p">,</span> <span class="mf">80.0</span><span class="p">]</span>
+
+<span class="n">all_reports</span> <span class="o">=</span> <span class="p">[]</span>
+
+<span class="k">for</span> <span class="n">pct</span> <span class="ow">in</span> <span class="n">mdr_grid</span><span class="p">:</span>
+    <span class="n">report</span><span class="p">,</span> <span class="n">preds</span> <span class="o">=</span> <span class="n">evaluate_stations</span><span class="p">(</span>
+        <span class="n">data</span><span class="o">=</span><span class="n">df</span><span class="p">,</span>
+        <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+        <span class="n">date_col</span><span class="o">=</span><span class="s2">&quot;date&quot;</span><span class="p">,</span>
+        <span class="n">lat_col</span><span class="o">=</span><span class="s2">&quot;latitude&quot;</span><span class="p">,</span>
+        <span class="n">lon_col</span><span class="o">=</span><span class="s2">&quot;longitude&quot;</span><span class="p">,</span>
+        <span class="n">alt_col</span><span class="o">=</span><span class="s2">&quot;altitude&quot;</span><span class="p">,</span>
+        <span class="n">target_col</span><span class="o">=</span><span class="n">TARGET</span><span class="p">,</span>
+        <span class="n">start</span><span class="o">=</span><span class="n">START</span><span class="p">,</span>
+        <span class="n">end</span><span class="o">=</span><span class="n">END</span><span class="p">,</span>
+        <span class="c1"># station selection</span>
+        <span class="n">station_ids</span><span class="o">=</span><span class="n">good_stations</span><span class="p">,</span>      <span class="c1"># from Step 1</span>
+        <span class="c1"># neighborhood (either k_neighbors or neighbor_map)</span>
+        <span class="n">k_neighbors</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+        <span class="n">neighbor_map</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="c1"># MDR control: fraction of target history used in training</span>
+        <span class="n">include_target_pct</span><span class="o">=</span><span class="n">pct</span><span class="p">,</span>
+        <span class="n">include_target_seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
+        <span class="c1"># model configuration</span>
+        <span class="n">model_kind</span><span class="o">=</span><span class="s2">&quot;rf&quot;</span><span class="p">,</span>
+        <span class="n">model_params</span><span class="o">=</span><span class="p">{</span>
+            <span class="s2">&quot;n_estimators&quot;</span><span class="p">:</span> <span class="mi">200</span><span class="p">,</span>
+            <span class="s2">&quot;max_depth&quot;</span><span class="p">:</span> <span class="mi">30</span><span class="p">,</span>
+            <span class="s2">&quot;n_jobs&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+            <span class="s2">&quot;random_state&quot;</span><span class="p">:</span> <span class="mi">42</span><span class="p">,</span>
+        <span class="p">},</span>
+        <span class="c1"># aggregation for monthly / annual metrics</span>
+        <span class="n">agg_for_metrics</span><span class="o">=</span><span class="s2">&quot;sum&quot;</span> <span class="k">if</span> <span class="n">TARGET</span> <span class="o">==</span> <span class="s2">&quot;prec&quot;</span> <span class="k">else</span> <span class="s2">&quot;mean&quot;</span><span class="p">,</span>
+        <span class="c1"># baseline (optional; if enabled in your version)</span>
+        <span class="n">baseline_kind</span><span class="o">=</span><span class="s2">&quot;mcm_doy&quot;</span><span class="p">,</span>   <span class="c1"># mean climatology by day-of-year</span>
+        <span class="c1"># UX</span>
+        <span class="n">show_progress</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">report</span><span class="p">[</span><span class="s2">&quot;include_target_pct&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">pct</span>
+    <span class="n">all_reports</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">report</span><span class="p">)</span>
+
+<span class="n">mdr_report</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span><span class="n">all_reports</span><span class="p">,</span> <span class="n">ignore_index</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">mdr_report</span><span class="o">.</span><span class="n">head</span><span class="p">()</span>
+</code></pre></div>
+
+<p>Each row in <code>mdr_report</code> typically contains:</p>
+<ul>
+<li>Station metadata: <code>station</code>, <code>latitude</code>, <code>longitude</code>, <code>altitude</code>.</li>
+<li>Training / test sizes: <code>rows_train</code>, <code>rows_test</code>, <code>n_rows</code>.</li>
+<li>Performance metrics:</li>
+<li>Daily: <code>MAE_d</code>, <code>RMSE_d</code>, <code>R2_d</code>, <code>KGE_d</code> (if available).</li>
+<li>Monthly: <code>MAE_m</code>, <code>RMSE_m</code>, <code>R2_m</code>, <code>KGE_m</code>.</li>
+<li>Annual: <code>MAE_y</code>, <code>RMSE_y</code>, <code>R2_y</code>, <code>KGE_y</code>.</li>
+<li>Baseline metrics (suffix <code>_base</code>) if a baseline is enabled.</li>
+<li>Configuration: <code>include_target_pct</code>, <code>used_k_neighbors</code>, timing.</li>
+</ul>
+<hr />
+<h2 id="5-step-4-summarize-mdr-curves">5. Step 4 – Summarize MDR curves<a class="headerlink" href="#5-step-4-summarize-mdr-curves" title="Permanent link">&para;</a></h2>
+<p>The core MDR question is:</p>
+<blockquote>
+<p><em>How does performance change as we increase the fraction of local station history in training?</em></p>
+</blockquote>
+<p>A standard approach is to:</p>
+<ol>
+<li>Aggregate metrics by <code>(include_target_pct, metric)</code> using medians.</li>
+<li>Optionally stratify by region, altitude band, climate regime, etc.</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="n">summary_mdr</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">mdr_report</span>
+    <span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;include_target_pct&quot;</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">agg</span><span class="p">(</span>
+        <span class="n">MAE_d_median</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;MAE_d&quot;</span><span class="p">,</span> <span class="s2">&quot;median&quot;</span><span class="p">),</span>
+        <span class="n">RMSE_d_median</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;RMSE_d&quot;</span><span class="p">,</span> <span class="s2">&quot;median&quot;</span><span class="p">),</span>
+        <span class="n">R2_d_median</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;R2_d&quot;</span><span class="p">,</span> <span class="s2">&quot;median&quot;</span><span class="p">),</span>
+        <span class="n">KGE_d_median</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;KGE_d&quot;</span><span class="p">,</span> <span class="s2">&quot;median&quot;</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="o">.</span><span class="n">reset_index</span><span class="p">()</span>
+<span class="p">)</span>
+
+<span class="n">summary_mdr</span>
+</code></pre></div>
+
+<p>You can then plot MDR curves, e.g. RMSE vs <code>include_target_pct</code>, or compare the Random Forest against the baseline (e.g. <code>RMSE_d</code> vs <code>RMSE_d_base</code>).</p>
+<hr />
+<h2 id="6-step-5-visual-diagnostics">6. Step 5 – Visual diagnostics<a class="headerlink" href="#6-step-5-visual-diagnostics" title="Permanent link">&para;</a></h2>
+<p><code>missclimatepy.viz</code> provides several ready-made plots to interpret MDR results and model behavior.</p>
+<h3 id="61-metric-distributions">6.1 Metric distributions<a class="headerlink" href="#61-metric-distributions" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib.pyplot</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">plt</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">missclimatepy</span><span class="w"> </span><span class="kn">import</span> <span class="n">viz</span>
+
+<span class="c1"># Subset a single MDR level, e.g. 16 %</span>
+<span class="n">rep_16</span> <span class="o">=</span> <span class="n">mdr_report</span><span class="p">[</span><span class="n">mdr_report</span><span class="p">[</span><span class="s2">&quot;include_target_pct&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="mf">16.0</span><span class="p">]</span>
+
+<span class="n">viz</span><span class="o">.</span><span class="n">plot_metrics_distribution</span><span class="p">(</span>
+    <span class="n">rep_16</span><span class="p">,</span>
+    <span class="n">metric_cols</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;MAE_d&quot;</span><span class="p">,</span> <span class="s2">&quot;RMSE_d&quot;</span><span class="p">,</span> <span class="s2">&quot;R2_d&quot;</span><span class="p">),</span>
+    <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;hist&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="62-spatial-patterns-of-performance">6.2 Spatial patterns of performance<a class="headerlink" href="#62-spatial-patterns-of-performance" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="n">viz</span><span class="o">.</span><span class="n">plot_spatial_scatter</span><span class="p">(</span>
+    <span class="n">rep_16</span><span class="p">,</span>
+    <span class="n">lat_col</span><span class="o">=</span><span class="s2">&quot;latitude&quot;</span><span class="p">,</span>
+    <span class="n">lon_col</span><span class="o">=</span><span class="s2">&quot;longitude&quot;</span><span class="p">,</span>
+    <span class="n">value_col</span><span class="o">=</span><span class="s2">&quot;RMSE_d&quot;</span><span class="p">,</span>
+    <span class="n">title</span><span class="o">=</span><span class="s2">&quot;Daily RMSE at include_target_pct=16%&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="63-time-series-overlays-or-imputed-series">6.3 Time-series overlays or imputed series<a class="headerlink" href="#63-time-series-overlays-or-imputed-series" title="Permanent link">&para;</a></h3>
+<p>Using the <code>preds</code> table from a particular MDR level, you can inspect individual stations:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">some_station</span> <span class="o">=</span> <span class="n">rep_16</span><span class="p">[</span><span class="s2">&quot;station&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+<span class="n">viz</span><span class="o">.</span><span class="n">plot_time_series_overlay</span><span class="p">(</span>
+    <span class="n">preds</span><span class="p">,</span>
+    <span class="n">station_id</span><span class="o">=</span><span class="n">some_station</span><span class="p">,</span>
+    <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+    <span class="n">date_col</span><span class="o">=</span><span class="s2">&quot;date&quot;</span><span class="p">,</span>
+    <span class="n">y_true_col</span><span class="o">=</span><span class="s2">&quot;y_obs&quot;</span><span class="p">,</span>
+    <span class="n">y_pred_col</span><span class="o">=</span><span class="s2">&quot;y_mod&quot;</span><span class="p">,</span>
+    <span class="n">title</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Observed vs modeled – station </span><span class="si">{</span><span class="n">some_station</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</code></pre></div>
+
+<p>For fully imputed datasets produced by <code>impute_dataset</code> (with a <code>source</code> flag):</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">missclimatepy.viz</span><span class="w"> </span><span class="kn">import</span> <span class="n">plot_imputed_series</span>
+
+<span class="n">ax</span> <span class="o">=</span> <span class="n">plot_imputed_series</span><span class="p">(</span>
+    <span class="n">df</span><span class="o">=</span><span class="n">imputed_df</span><span class="p">,</span>
+    <span class="n">station</span><span class="o">=</span><span class="n">some_station</span><span class="p">,</span>
+    <span class="n">id_col</span><span class="o">=</span><span class="s2">&quot;station&quot;</span><span class="p">,</span>
+    <span class="n">date_col</span><span class="o">=</span><span class="s2">&quot;date&quot;</span><span class="p">,</span>
+    <span class="n">target_col</span><span class="o">=</span><span class="n">TARGET</span><span class="p">,</span>
+    <span class="n">source_col</span><span class="o">=</span><span class="s2">&quot;source&quot;</span><span class="p">,</span>
+    <span class="n">title</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">TARGET</span><span class="si">}</span><span class="s2"> – observed vs imputed – station </span><span class="si">{</span><span class="n">some_station</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</code></pre></div>
+
+<hr />
+<h2 id="7-interpreting-mdr-results">7. Interpreting MDR results<a class="headerlink" href="#7-interpreting-mdr-results" title="Permanent link">&para;</a></h2>
+<p>Typical MDR findings include:</p>
+<ul>
+<li>A <strong>baseline performance</strong> at <code>include_target_pct=0.0</code>, representing pure spatial interpolation (LOSO-like).</li>
+<li>A <strong>rapid improvement</strong> in MAE/RMSE and KGE as the first 5–20 % of station history is included.</li>
+<li>A <strong>plateau</strong> beyond a certain threshold (e.g. 40–60 %), where additional history yields diminishing returns.</li>
+<li>Differences in MDR curves between regions (e.g. humid vs semi-arid climates, lowland vs highland stations).</li>
+</ul>
+<p>These patterns can be:</p>
+<ul>
+<li>Reported as <strong>MDR thresholds</strong>, e.g. “a minimum of 20 % observed days is needed for median KGE ≥ 0.7”.</li>
+<li>Used to <strong>classify stations</strong> into categories (well-constrained vs under-observed).</li>
+<li>Incorporated into <strong>data-quality guidelines</strong> for operational networks and retrospective reconstructions.</li>
+</ul>
+<hr />
+<h2 id="8-reproducibility-notes">8. Reproducibility notes<a class="headerlink" href="#8-reproducibility-notes" title="Permanent link">&para;</a></h2>
+<p>To ensure fully reproducible MDR experiments:</p>
+<ul>
+<li>Fix <code>include_target_seed</code> for stratified sampling of target rows.</li>
+<li>Fix the <code>random_state</code> in the model parameters (e.g. Random Forest).</li>
+<li>Version control:</li>
+<li>The dataset (e.g. Zenodo DOI).</li>
+<li>The exact MissClimatePy version (e.g. <code>v0.1.1</code>).</li>
+<li>The MDR grid, station filters, and neighbor configuration.</li>
+<li>Prefer using an explicit <code>neighbor_map</code> saved to disk for cross-runs consistency.</li>
+</ul>
+<p>This protocol aims to be a <strong>template</strong>: you can adapt it to different periods, variables, regions, or model backends, while keeping the core XYZT and MDR philosophy of <code>MissClimatePy</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.tracking", "toc.integrate", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.973d3a69.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.f55a23d4.min.js"></script>
+      
+    
+  </body>
+</html>

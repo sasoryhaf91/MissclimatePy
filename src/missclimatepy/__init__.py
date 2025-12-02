@@ -147,4 +147,4 @@ __all__ = [
 
 
 # Sync this with pyproject.toml if you bump the version
-__version__ = "0.1.0"
+__version__ = "0.1.1"

@@ -17,7 +17,7 @@
 
 The package is designed for situations where:
 
-- You need to **reconstruct complete daily series** (e.g. 1991–2020) at station level.
+- You need to **reconstruct complete daily series** (e.g., 1991–2020) at station level.
 - You want to avoid dependency on **external covariates** (reanalyses, satellite products, gridded datasets).
 - You require **transparent, station-wise diagnostics** suitable for Minimum Data Requirement (MDR) and interpolation studies.
 
@@ -49,7 +49,7 @@ cd MissclimatePy
 pip install -e ".[dev]"
 ```
 
-Once a PyPI release is available, installation will be simply:
+Once a PyPI release is available, installation will be as simple as:
 
 ```bash
 pip install missclimatepy
@@ -136,10 +136,10 @@ tmin_imputed = impute_dataset(
 # [station, latitude, longitude, altitude, date, tmin, source]
 print(tmin_imputed.head())
 
-# 3) Visualise one station (e.g. 15017)
+# 3) Visualise one station (e.g., "15017")
 ax = plot_imputed_series(
     df=tmin_imputed,
-    station=15017,
+    station="15017",
     id_col="station",
     date_col="date",
     target_col="tmin",
@@ -186,13 +186,13 @@ report, preds = evaluate_stations(
     target_col="tmin",
     start="1991-01-01",
     end="2020-12-31",
-    prefix=["15"],               # optional station filter (e.g., State of Mexico)
+    prefix=["15"],                # optional station filter (e.g., State of Mexico)
     min_station_rows=365,
     k_neighbors=20,
-    include_target_pct=0.0,      # 0.0 ~ strict LOSO; >0 introduces controlled leakage
+    include_target_pct=0.0,       # 0.0 ~ strict LOSO; >0 introduces controlled leakage
     model_kind="rf",
     model_params={"n_estimators": 15, "random_state": 42, "n_jobs": -1},
-    baseline_kind="mcm_doy",     # optional mean-climatology baseline by day-of-year
+    baseline_kind="mcm_doy",      # mean-climatology baseline by day-of-year
     agg_for_metrics="mean",       # "sum" for precipitation, "mean" for temperatures
     show_progress=True,
 )
