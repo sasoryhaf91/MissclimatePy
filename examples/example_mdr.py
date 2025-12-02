@@ -1,46 +1,161 @@
+"""
+example_mdr.py
+
+Minimum Data Requirement (MDR) experiment using MissClimatePy.
+
+This script:
+  1. Downloads the public SMN daily dataset (1991–2020) from Zenodo.
+  2. Filters stations from the State of Mexico (prefix "15").
+  3. Runs station-wise evaluation for a range of include_target_pct values.
+  4. Saves a combined MDR report to CSV.
+
+WARNING:
+  - This example may take several minutes depending on your hardware.
+  - For quick testing, reduce N_STATIONS_MAX or the MDR_PCTS list.
+
+Reference dataset:
+  Antonio-Fernández, H., Vaquera-Huerta, H., Rosengaus-Monshinsky, M. M., 
+  Pérez-Rodríguez, P., & Crossa, J. (2025). Daily Meteorological Records for 
+  Operational SMN Stations in Mexico (1991–2020) with NASA POWER Co-located Variables 
+  (v1.0.0) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.17636066
+"""
+
+from __future__ import annotations
+
+import pathlib
+from typing import Iterable, List
+
 import pandas as pd
-import numpy as np
-from missclimatepy import MissClimateImputer
-from missclimatepy.requirements import estimate_mdr, mdr_curves
 
-def fake_df(n_stations=6, days=90, seed=0):
-    rng = np.random.default_rng(seed)
-    rows = []
-    for s in range(n_stations):
-        lat = 15 + 20*rng.random()
-        lon = -110 + 20*rng.random()
-        elev = 500 + 2000*rng.random()
-        dates = pd.date_range("1991-01-01", periods=days, freq="D")
-        base = 10 + 8*np.sin(2*np.pi*np.arange(days)/365.0) + rng.normal(0, 1.0, days)
-        miss = rng.random(days) < 0.15
-        base[miss] = np.nan
-        for d, v in zip(dates, base):
-            rows.append({"station": f"S{s:03d}", "date": d,
-                         "latitude": lat, "longitude": lon, "elevation": elev,
-                         "tmin": v})
-    return pd.DataFrame(rows)
+from missclimatepy.evaluate import evaluate_stations
 
-df = fake_df()
+# ---------------------------------------------------------------------
+# User-configurable parameters
+# ---------------------------------------------------------------------
 
-imp = MissClimateImputer(target="tmin", k_neighbors=8, min_obs_per_station=30, n_estimators=200, n_jobs=-1).fit(df)
+# Zenodo CSV with daily SMN records, 1991–2020
+ZENODO_URL = "https://zenodo.org/records/17636066/files/smn_mx_daily_1991_2020.csv"
 
-mdr = estimate_mdr(
-    df=df, target="tmin",
-    metric_thresholds={"RMSE": 1.5, "R2": 0.4},
-    missing_fracs=[0.1, 0.3],
-    grid_K=[3,5,8,12],
-    grid_min_obs=[20,30,60],
-    grid_train_frac=[0.05,0.1,0.2,0.4,0.6],
-    random_state=42
-)
-print(mdr.head())
+# Temporal window for the experiment
+START = "1991-01-01"
+END = "2020-12-31"
 
-cur = mdr_curves(
-    df=df, target="tmin",
-    K=8, min_obs=30,
-    train_fracs=[0.05,0.1,0.2,0.4,0.6,0.8],
-    missing_frac=0.3,
-    random_state=42
-)
-print(cur.head())
+# Station selection: Estado de México (prefix "15")
+STATION_PREFIXES: List[str] = ["15"]
 
+# Minimum number of observed rows per station (MDR baseline)
+MIN_STATION_ROWS = 365 * 10  # ~10 years of data
+
+# Maximum number of stations to keep (for speed)
+N_STATIONS_MAX = 40
+
+# MDR percentages to test (fraction of target station used in training)
+MDR_PCTS: Iterable[float] = (0, 4, 8, 16, 20, 40, 60, 80)
+
+# Target variable
+TARGET_COL = "tmin"
+
+# Output path
+OUT_CSV = pathlib.Path("mdr_report_tmin_mex_state.csv")
+
+
+# ---------------------------------------------------------------------
+# Helper: load and pre-filter data
+# ---------------------------------------------------------------------
+def load_data() -> pd.DataFrame:
+    """Load daily SMN data from Zenodo and return a pre-filtered DataFrame."""
+    print(f"[load] Reading data from {ZENODO_URL!r} ...")
+    df = pd.read_csv(ZENODO_URL, parse_dates=["date"])
+
+    # Basic schema checks (will raise if missing)
+    required = {"station", "date", "latitude", "longitude", "altitude", TARGET_COL}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"Input is missing required columns: {sorted(missing)}")
+
+    # Temporal filter
+    mask_time = (df["date"] >= START) & (df["date"] <= END)
+    df = df.loc[mask_time].copy()
+
+    # Prefix-based station filter (Estado de México)
+    if STATION_PREFIXES:
+        station_str = df["station"].astype(str)
+        mask_prefix = station_str.str.startswith(tuple(STATION_PREFIXES))
+        df = df.loc[mask_prefix].copy()
+
+    # For speed: limit number of stations
+    unique_st = df["station"].unique()
+    if len(unique_st) > N_STATIONS_MAX:
+        keep = unique_st[:N_STATIONS_MAX]
+        df = df[df["station"].isin(keep)].copy()
+
+    print(
+        f"[load] Using {df['station'].nunique()} stations and "
+        f"{len(df):,} daily records in {START}–{END}."
+    )
+    return df
+
+
+# ---------------------------------------------------------------------
+# Main MDR loop
+# ---------------------------------------------------------------------
+def run_mdr_experiment(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Run station-wise evaluation for various include_target_pct values.
+
+    Returns
+    -------
+    pd.DataFrame
+        Concatenated station-level reports with an extra column
+        'include_target_pct' indicating the MDR scenario.
+    """
+    reports = []
+
+    for pct in MDR_PCTS:
+        print(f"[MDR] Evaluating include_target_pct = {pct}% ...")
+        report, _preds = evaluate_stations(
+            data=df,
+            id_col="station",
+            date_col="date",
+            lat_col="latitude",
+            lon_col="longitude",
+            alt_col="altitude",
+            target_col=TARGET_COL,
+            start=START,
+            end=END,
+            prefix=STATION_PREFIXES,
+            min_station_rows=MIN_STATION_ROWS,
+            k_neighbors=20,
+            include_target_pct=float(pct),
+            include_target_seed=42,
+            model_kind="rf",
+            model_params={
+                "n_estimators": 200,
+                "max_depth": 30,
+                "random_state": 42,
+                "n_jobs": -1,
+            },
+            agg_for_metrics="sum" if TARGET_COL == "prec" else "mean",
+            show_progress=True,
+        )
+        report["include_target_pct"] = pct
+        reports.append(report)
+
+    full_report = pd.concat(reports, ignore_index=True)
+    return full_report
+
+
+def main() -> None:
+    df = load_data()
+    full_report = run_mdr_experiment(df)
+
+    print(f"[save] Writing MDR report to {OUT_CSV} ...")
+    full_report.to_csv(OUT_CSV, index=False)
+    print(
+        "[done] MDR experiment finished.\n"
+        f"       Output: {OUT_CSV.resolve()}"
+    )
+
+
+if __name__ == "__main__":
+    main()
