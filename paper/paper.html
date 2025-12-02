@@ -6,9 +6,9 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
-<meta name="dcterms.date" content="2025-11-16">
+<meta name="dcterms.date" content="2025-12-01">
 
-<title>MissClimatePy: Spatial–Temporal Random-Forest Imputation for Daily Climate Station Records</title>
+<title>MissClimatePy: Spatial–Temporal Imputation for Daily Climate Station Records in Python</title>
 <style>
 code{white-space: pre-wrap;}
 span.smallcaps{font-variant: small-caps;}
@@ -91,6 +91,35 @@ div.csl-indent {
 <link href="paper_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
 <link href="paper_files/libs/bootstrap/bootstrap-bb462d781dde1847d9e3ccf7736099dd.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
 
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN") {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
 
 </head>
 
@@ -102,7 +131,7 @@ div.csl-indent {
 
 <header id="title-block-header" class="quarto-title-block default">
 <div class="quarto-title">
-<h1 class="title">MissClimatePy: Spatial–Temporal Random-Forest Imputation for Daily Climate Station Records</h1>
+<h1 class="title">MissClimatePy: Spatial–Temporal Imputation for Daily Climate Station Records in Python</h1>
 </div>
 
 
@@ -158,7 +187,7 @@ div.csl-indent {
     <div>
     <div class="quarto-title-meta-heading">Published</div>
     <div class="quarto-title-meta-contents">
-      <p class="date">November 16, 2025</p>
+      <p class="date">December 1, 2025</p>
     </div>
   </div>
   
@@ -172,121 +201,73 @@ div.csl-indent {
 
 <section id="summary" class="level1">
 <h1>Summary</h1>
-<p>Daily climate station records are frequently affected by substantial missingness resulting from sensor degradation, irregular maintenance, adverse weather conditions, and inconsistencies accumulated across decades of observation. In many national networks, gaps of 40–70% are common, particularly for precipitation, minimum temperature, and maximum temperature—variables essential for climate diagnostics, hydrological modelling, agricultural decision-making, and the estimation of climatological normals <span class="citation" data-cites="Morice2021 Huang2024 Dunn2023">(<a href="#ref-Morice2021" role="doc-biblioref">Morice et al. 2021</a>; <a href="#ref-Huang2024" role="doc-biblioref">Huang et al. 2024</a>; <a href="#ref-Dunn2023" role="doc-biblioref">Dunn et al. 2023</a>)</span>. Although satellite- and reanalysis-based gridded products exist, they often introduce spatial smoothing, temporal discontinuities, or methodological shifts that hinder their use for station-level historical reconstructions <span class="citation" data-cites="Cornes2018 Hersbach2020">(<a href="#ref-Cornes2018" role="doc-biblioref">Cornes et al. 2018</a>; <a href="#ref-Hersbach2020" role="doc-biblioref">Hersbach et al. 2020</a>)</span>.</p>
-<p>Traditional interpolation methods—such as inverse-distance weighting, kriging, splines, or linear regression—depend on distributional assumptions and dense networks, limiting their performance in sparse or highly incomplete observational settings <span class="citation" data-cites="LI2011228">(<a href="#ref-LI2011228" role="doc-biblioref">Li and Heap 2011</a>)</span>. Modern machine-learning approaches, including Random Forests, gradient boosting, and deep neural networks, offer greater flexibility <span class="citation" data-cites="Reichstein2019 YANG2024120797">(<a href="#ref-Reichstein2019" role="doc-biblioref">Reichstein et al. 2019</a>; <a href="#ref-YANG2024120797" role="doc-biblioref">Yang et al. 2024</a>)</span>, but they typically rely on auxiliary predictors drawn from remote sensing, land-surface models, or reanalysis data <span class="citation" data-cites="Beck2020 Freitas2025">(<a href="#ref-Beck2020" role="doc-biblioref">Beck et al. 2020</a>; <a href="#ref-Freitas2025" role="doc-biblioref">Freitas et al. 2025</a>)</span>, which may be unavailable or unsuitable for long-term station reconstructions.</p>
-<p>MissClimatePy introduces a minimalist, fully reproducible imputation framework that depends exclusively on universally available station metadata—latitude, longitude, elevation—and calendar features (year, month, day-of-year, optional harmonic transforms). Despite its constrained feature space, MissClimatePy trains a robust spatial–temporal Random Forest capable of reconstructing daily climate variables even when stations contain only a single year—or no years—of valid observations. The package incorporates controlled missingness experiments, neighbor-based benchmarking, gap diagnostics, and spatial error visualization, offering a transparent and scientifically defensible approach for climate data reconstruction.</p>
+<p>Daily climate station records often contain large gaps due to sensor failures, irregular maintenance, and decades of operational changes. In many national networks, missing fractions of 40–70 % are common for key variables such as precipitation and minimum and maximum temperature—inputs that underpin climate diagnostics, hydrology, agriculture, and climatological normals <span class="citation" data-cites="Morice2021 Huang2024 Dunn2023">(<a href="#ref-Morice2021" role="doc-biblioref">Morice et al. 2021</a>; <a href="#ref-Huang2024" role="doc-biblioref">Huang et al. 2024</a>; <a href="#ref-Dunn2023" role="doc-biblioref">Dunn et al. 2023</a>)</span>. Gridded satellite and reanalysis products help, but spatial smoothing and methodological breaks often make them unsuitable for station-level reconstructions <span class="citation" data-cites="Cornes2018 Hersbach2020">(<a href="#ref-Cornes2018" role="doc-biblioref">Cornes et al. 2018</a>; <a href="#ref-Hersbach2020" role="doc-biblioref">Hersbach et al. 2020</a>)</span>.</p>
+<p>Traditional interpolation methods, such as inverse-distance weighting and kriging, rely on distributional assumptions and relatively dense networks, and their performance degrades under sparse or highly incomplete observations <span class="citation" data-cites="LI2011228">(<a href="#ref-LI2011228" role="doc-biblioref">Li and Heap 2011</a>)</span>. Modern machine-learning approaches offer greater flexibility <span class="citation" data-cites="Reichstein2019 YANG2024120797">(<a href="#ref-Reichstein2019" role="doc-biblioref">Reichstein et al. 2019</a>; <a href="#ref-YANG2024120797" role="doc-biblioref">Yang et al. 2024</a>)</span>, but usually depend on external covariates from remote sensing or reanalyses <span class="citation" data-cites="Beck2020 Freitas2025">(<a href="#ref-Beck2020" role="doc-biblioref">Beck et al. 2020</a>; <a href="#ref-Freitas2025" role="doc-biblioref">Freitas et al. 2025</a>)</span>, which may be unavailable, inconsistent, or hard to reproduce over long archives.</p>
+<p><strong>MissClimatePy</strong> is a lightweight Python package for evaluating and imputing daily station records using only station metadata—latitude, longitude, elevation—and calendar features (year, month, day-of-year, optional harmonic transforms). It enforces a simple XYZT representation (X–Y: latitude–longitude, Z: elevation, T: time) and intentionally ignores additional covariates, focusing on what can be learned from the station network itself. The package provides station-wise model evaluation, local Random-Forest-based imputation of target series, neighbour-based training pools, and diagnostics and visualisations tailored to Minimum Data Requirement (MDR) and interpolation studies.</p>
 </section>
 <section id="statement-of-need" class="level1">
 <h1>Statement of Need</h1>
-<p>Reliable daily climate observations form the backbone of drought monitoring, agricultural risk management, hydrological modelling, and climate-change assessments. Yet missing data continue to be one of the most persistent challenges across national meteorological networks, particularly in regions with limited resources or complex topography <span class="citation" data-cites="Huang2024">(<a href="#ref-Huang2024" role="doc-biblioref">Huang et al. 2024</a>)</span>. Even well-maintained archives exhibit long gaps due to station relocation, technological transitions, or the integration of heterogeneous historical sources <span class="citation" data-cites="Dunn2023">(<a href="#ref-Dunn2023" role="doc-biblioref">Dunn et al. 2023</a>)</span>.</p>
-<p>Many state-of-the-art imputation frameworks require external data sources such as satellite precipitation, remotely sensed vegetation indices, gridded temperature fields, or atmospheric reanalyses. These covariates are often unavailable historically, inconsistent across decades, or insufficiently representative of local station behavior. Consequently, there is an urgent need for a covariate-independent, transparent, and reproducible station-level imputation tool that:</p>
-<ul>
-<li>performs reliably under extreme missingness,</li>
-<li>requires only universally available metadata,</li>
-<li>produces deterministic and auditable results,</li>
-<li>scales to national archives comprising tens of millions of rows,</li>
-<li>and includes comprehensive diagnostic tools suitable for peer-reviewed research.</li>
-</ul>
-<p>MissClimatePy fulfills this requirement by implementing a minimalist, yet powerful spatial–temporal machine-learning framework specifically designed for daily climate station reconstruction.</p>
+<p>Missing data remain a major limitation of meteorological networks, especially in regions with limited resources or complex topography <span class="citation" data-cites="Huang2024">(<a href="#ref-Huang2024" role="doc-biblioref">Huang et al. 2024</a>)</span>. Many imputation frameworks require external datasets such as satellite precipitation, vegetation indices, or gridded temperatures, which are often unavailable historically or poorly representative of local station behaviour. Daily station archives also rarely include rich multivariate covariates per timestamp, which limits the applicability of multivariate imputation schemes such as MICE or MissForest <span class="citation" data-cites="Stekhoven2012">(<a href="#ref-Stekhoven2012" role="doc-biblioref">Stekhoven and Bühlmann 2012</a>)</span>. MissClimatePy instead offers a covariate-independent, transparent, and reproducible station-level tool that scales to archives with thousands of stations and multiple decades while using only local metadata plus calendar structure and exposing per-station diagnostics suitable for MDR and interpolation studies.</p>
 </section>
 <section id="functionality-and-implementation" class="level1">
 <h1>Functionality and Implementation</h1>
-<section id="minimal-feature-random-forest-imputation" class="level2">
-<h2 class="anchored" data-anchor-id="minimal-feature-random-forest-imputation">Minimal-Feature Random Forest Imputation</h2>
-<p>The MissClimateImputer class trains a Random Forest model using only:</p>
-<ul>
-<li>latitude, longitude, elevation,</li>
-<li>year, month, day-of-year,</li>
-<li>optional sin/cos day-of-year harmonics.</li>
-</ul>
-<p>The model is fit exclusively on rows where the target variable is observed and then applied to fill all missing values. Importantly, because predictors derive solely from spatial coordinates and calendar structure, the imputer remains fully functional even when the target station contains no valid historical observations.</p>
-</section>
-<section id="spatial-neighborbased-evaluation" class="level2">
-<h2 class="anchored" data-anchor-id="spatial-neighborbased-evaluation">Spatial Neighbor–Based Evaluation</h2>
-<p>The <code>evaluate_stations()</code> routine provides a rigorous and reproducible validation protocol. It employs:</p>
-<ul>
-<li>Haversine nearest neighbors (BallTree),</li>
-<li>deterministic neighbor ordering,</li>
-<li>optional radius and elevation constraints,</li>
-<li>user-defined masking fractions (0–95%) for Minimum Data Requirement (MDR) experiments,</li>
-<li>rainfall-specific wet/dry stratified sampling.</li>
-</ul>
-<p>This design makes it possible to assess imputation performance at stations with extremely sparse or absent data, demonstrating the generalization capacity of the spatial–temporal model.</p>
-</section>
-<section id="missingness-and-gap-diagnostics" class="level2">
-<h2 class="anchored" data-anchor-id="missingness-and-gap-diagnostics">Missingness and Gap Diagnostics</h2>
-<p>The <code>masking</code> module implements tools for:</p>
-<ul>
-<li>longest-gap and mean-gap metrics,<br>
-</li>
-<li>percentage-missing profiles over user-defined windows,<br>
-</li>
-<li>deterministic random masking for controlled experiments,<br>
-</li>
-<li>synthetic missingness generation suitable for MDR analysis.</li>
-</ul>
-<p>These diagnostics follow best practices in observational climate data quality assessment and support reproducible MDR studies.</p>
-</section>
-<section id="spatial-utilities" class="level2">
-<h2 class="anchored" data-anchor-id="spatial-utilities">Spatial Utilities</h2>
-<p>The <code>neighbors</code> module constructs deterministic neighbor maps using Haversine distance and optional altitude constraints. These maps support localized modelling, reproducibility, and the exploration of spatial error structures.</p>
-</section>
-<section id="visualization-suite" class="level2">
-<h2 class="anchored" data-anchor-id="visualization-suite">Visualization Suite</h2>
-<p>The <code>viz</code> module provides intuitive visual diagnostics, including:</p>
-<ul>
-<li>missingness heatmaps,<br>
-</li>
-<li>parity scatterplots,<br>
-</li>
-<li>spatial RMSE maps,<br>
-</li>
-<li>observed–vs–imputed time-series overlays,<br>
-</li>
-<li>gap-length histograms,<br>
-</li>
-<li>imputation coverage plots.</li>
-</ul>
-<p>All visualizations rely solely on <code>numpy</code>, <code>pandas</code>, and <code>matplotlib</code>, ensuring minimal dependencies and consistent rendering across environments.</p>
-</section>
-<section id="lightweight-reproducible-architecture" class="level2">
-<h2 class="anchored" data-anchor-id="lightweight-reproducible-architecture">Lightweight, Reproducible Architecture</h2>
-<p>MissClimatePy is intentionally designed with minimal external dependencies ( <code>numpy</code>, <code>pandas</code>, and <code>scikit-learn</code>n) to ensure stability, simplicity, and long-term maintainability. The modular architecture enhances clarity, reproducibility, and extensibility for research and operational use.</p>
-</section>
+<p>MissClimatePy is organised in small, focused submodules that operate directly on long-format <code>pandas</code> tables. The <code>features</code> utilities handle datetime parsing and calendar feature engineering, while remaining schema-agnostic through explicit column-name arguments. The <code>neighbors</code> utilities build spatial neighbour maps using haversine distance on latitude–longitude so that K-nearest-neighbour sets can be reused across workflows.</p>
+<p>Model backends are provided by a compact registry in <code>models</code>, which wraps scikit-learn regressors under a single factory. Random Forests are the default, but alternative tree ensembles, k-nearest neighbours, multilayer perceptrons, support-vector regression, and linear models are also available. All operate on dense numeric XYZT feature matrices and share a common configuration interface.</p>
+<p>The core station-wise evaluation protocol is implemented in <code>evaluate_stations</code> (module <code>evaluate</code>). For each target station, the function builds a training pool from all other stations or a KNN neighbour subset, applies a user-defined time window and a Minimum Data Requirement filter based on the number of observed target values, and optionally includes a controlled fraction of the station’s own valid rows via a precipitation-friendly stratified sampler over month × dry/wet conditions. It then fits the chosen backend and computes daily, monthly, and annual metrics on a held-out test set, returning (i) a station-level report with metrics, timing, training/test sizes, neighbour information, and median coordinates, and (ii) a prediction table for all evaluated observations.</p>
+<p>Local imputation of a single target variable is handled by <code>impute_dataset</code> (module <code>impute</code>). For each selected station, it trains a <code>RandomForestRegressor</code> using neighbouring stations (or all others) plus an optional fraction of its own observed history. A full daily grid is created over the requested window, predictions are generated for all days, and observed values are preserved whenever available. The function returns a tidy table with exactly <code>[station, date, latitude, longitude, altitude, &lt;target&gt;, source]</code>, where <code>source</code> is <code>"observed"</code> or <code>"imputed"</code>, and can save results to CSV or Parquet, optionally partitioned by station.</p>
+<p>Diagnostics are provided by <code>metrics</code>, <code>masking</code>, and <code>viz</code>. Metrics include mean absolute error (MAE), root mean square error (RMSE), coefficient of determination (<span class="math inline">\(R^2\)</span>), and Kling–Gupta efficiency (KGE). Masking helpers compute percentage-missing profiles and gap statistics, build station × date missingness matrices, and generate deterministic masking scenarios for controlled experiments. Visualisation helpers produce missingness matrices, metric distributions, parity plots, time-series overlays, spatial performance maps, gap histograms, and imputation coverage charts, all returning matplotlib <code>Axes</code> objects. MissClimatePy depends only on <code>numpy</code>, <code>pandas</code>, <code>scikit-learn</code>, and <code>matplotlib</code>.</p>
 <section id="example" class="level2">
 <h2 class="anchored" data-anchor-id="example">Example</h2>
-<div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> missclimatepy <span class="im">import</span> MissClimateImputer</span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> missclimatepy.requirements <span class="im">import</span> estimate_mdr</span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>imp <span class="op">=</span> MissClimateImputer(target<span class="op">=</span><span class="st">"tmin"</span>, k_neighbors<span class="op">=</span><span class="dv">8</span>, min_obs_per_station<span class="op">=</span><span class="dv">30</span>)</span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>imp.fit(df)</span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>df_out <span class="op">=</span> imp.fit_transform(df)</span>
-<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>mdr <span class="op">=</span> estimate_mdr(</span>
-<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    df<span class="op">=</span>df,</span>
-<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    target<span class="op">=</span><span class="st">"tmin"</span>,</span>
-<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    metric_thresholds<span class="op">=</span>{<span class="st">"RMSE"</span>: <span class="fl">1.5</span>, <span class="st">"R2"</span>: <span class="fl">0.5</span>},</span>
-<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    missing_fracs<span class="op">=</span>[<span class="fl">0.1</span>, <span class="fl">0.3</span>, <span class="fl">0.6</span>],</span>
-<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    grid_K<span class="op">=</span>[<span class="dv">3</span>, <span class="dv">5</span>, <span class="dv">8</span>, <span class="dv">12</span>]</span>
-<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>The following snippet illustrates a typical workflow using an open Zenodo dataset of daily SMN stations in Mexico <span class="citation" data-cites="AntonioFernandez2025SMN">(<a href="#ref-AntonioFernandez2025SMN" role="doc-biblioref">Antonio-Fernández et al. 2025</a>)</span>. In this example, MissClimatePy imputes the stations located in the State of Mexico using only coordinates and calendar information; all other columns are ignored.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> matplotlib.pyplot <span class="im">as</span> plt</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> missclimatepy.impute <span class="im">import</span> impute_dataset <span class="im">as</span> impute</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> missclimatepy.viz <span class="im">import</span> plot_imputed_series <span class="im">as</span> pis</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>url <span class="op">=</span> <span class="st">"https://zenodo.org/records/17636066/files/smn_mx_daily_1991_2020.csv"</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> pd.read_csv(url, parse_dates<span class="op">=</span>[<span class="st">"date"</span>])</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>tmin_imputed <span class="op">=</span> impute(</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    df, id_col<span class="op">=</span><span class="st">"station"</span>, date_col<span class="op">=</span><span class="st">"date"</span>,</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    lat_col<span class="op">=</span><span class="st">"latitude"</span>, lon_col<span class="op">=</span><span class="st">"longitude"</span>, alt_col<span class="op">=</span><span class="st">"altitude"</span>,</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    target_col<span class="op">=</span><span class="st">"tmin"</span>, start<span class="op">=</span><span class="st">"1991-01-01"</span>, end<span class="op">=</span><span class="st">"2020-12-31"</span>,</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    prefix <span class="op">=</span> [<span class="st">"15"</span>], model_kind<span class="op">=</span><span class="st">"rf"</span>, </span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    model_params<span class="op">=</span>{<span class="st">"n_estimators"</span>: <span class="dv">15</span>, <span class="st">"random_state"</span>: <span class="dv">42</span>, <span class="st">"n_jobs"</span>: <span class="op">-</span><span class="dv">1</span>},</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>ax <span class="op">=</span> pis(</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    df<span class="op">=</span>tmin_imputed,station<span class="op">=</span><span class="dv">15017</span>, id_col<span class="op">=</span><span class="st">"station"</span>, </span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>    date_col<span class="op">=</span><span class="st">"date"</span>, target_col<span class="op">=</span><span class="st">"tmin"</span>, source_col<span class="op">=</span><span class="st">"source"</span>,</span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Minimum temperature imputed – station 15017"</span>,</span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>plt.show()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div id="fig-imputed-series" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-imputed-series-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="figures/imputed_tmin_15017.png" class="img-fluid figure-img">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-imputed-series-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: Example of daily minimum temperature reconstruction for station 15017 (State of Mexico). Original observations are preserved, gaps are filled by the XYZT Random Forest model, and the <code>source</code> flag differentiates observed vs imputed days.
+</figcaption>
+</figure>
+</div>
 </section>
 </section>
 <section id="related-work" class="level1">
 <h1>Related Work</h1>
-<p>Recent developments in climate data reconstruction have expanded the use of machine learning, hybrid geostatistical–AI frameworks, and deep-learning architectures <span class="citation" data-cites="Reichstein2019 YANG2024120797">(<a href="#ref-Reichstein2019" role="doc-biblioref">Reichstein et al. 2019</a>; <a href="#ref-YANG2024120797" role="doc-biblioref">Yang et al. 2024</a>)</span>. Hybrid approaches combining kriging with ML or remote-sensing covariates have achieved high accuracy for temperature and precipitation interpolation <span class="citation" data-cites="Huang2024">(<a href="#ref-Huang2024" role="doc-biblioref">Huang et al. 2024</a>)</span>, while satellite–ML combinations have improved precipitation estimation in regions with limited ground observations <span class="citation" data-cites="Freitas2025">(<a href="#ref-Freitas2025" role="doc-biblioref">Freitas et al. 2025</a>)</span>. However, these methods rely on external datasets that are often unavailable for historical reconstructions.</p>
-<p>Traditional interpolation techniques remain indispensable but degrade rapidly under sparse station density or high missingness <span class="citation" data-cites="LI2011228">(<a href="#ref-LI2011228" role="doc-biblioref">Li and Heap 2011</a>)</span>. Multivariate imputation algorithms like MICE or MissForest assume the presence of multiple covariates per timestamp <span class="citation" data-cites="Stekhoven2012">(<a href="#ref-Stekhoven2012" role="doc-biblioref">Stekhoven and Bühlmann 2012</a>)</span>, which daily station archives rarely provide.</p>
-<p>MissClimatePy diverges fundamentally from these approaches by restricting its predictor space to spatial coordinates and calendar features alone, enabling imputation in data-sparse contexts and ensuring reproducibility across diverse historical periods.</p>
+<p>Recent developments in climate data reconstruction have expanded the use of machine learning, geostatistical–AI hybrids, and deep-learning architectures <span class="citation" data-cites="Reichstein2019 YANG2024120797">(<a href="#ref-Reichstein2019" role="doc-biblioref">Reichstein et al. 2019</a>; <a href="#ref-YANG2024120797" role="doc-biblioref">Yang et al. 2024</a>)</span>. Traditional interpolation techniques remain indispensable but degrade rapidly under sparse station density or high missingness <span class="citation" data-cites="LI2011228">(<a href="#ref-LI2011228" role="doc-biblioref">Li and Heap 2011</a>)</span>, and multivariate imputation algorithms such as MICE or MissForest assume the presence of multiple covariates per timestamp <span class="citation" data-cites="Stekhoven2012">(<a href="#ref-Stekhoven2012" role="doc-biblioref">Stekhoven and Bühlmann 2012</a>)</span>, which daily station archives rarely provide. MissClimatePy instead restricts its predictor space to XYZT only (coordinates and calendar structure), offering a reproducible way to test how far one can go in interpolating and reconstructing daily station records using only the station network itself.</p>
 </section>
 <section id="acknowledgements" class="level1">
 <h1>Acknowledgements</h1>
-<p>This work was supported by the Secretaría de Ciencia, Humanidades, Tecnología e Innovación (SECIHTI) through a doctoral scholarship granted to the first author under Mexico’s National Postgraduate System. We acknowledge the Comisión Nacional del Agua (CONAGUA) for maintaining the national meteorological database forming the foundation of this package, and the Colegio de Postgraduados and Universidad Mexiquense del Bicentenario for institutional support. We also thank the International Maize and Wheat Improvement Center (CIMMYT) for fostering collaboration in open climate and agricultural research.</p>
-</section>
-<section id="references" class="level1 unnumbered">
-
+<p>This work was supported by the Secretaría de Ciencia, Humanidades, Tecnología e Innovación (SECIHTI) through a doctoral scholarship to the first author. We acknowledge Colegio de Postgraduados and Universidad Mexiquense del Bicentenario for institutional support. We also thank the International Maize and Wheat Improvement Center (CIMMYT) for fostering collaboration in open climate and agricultural research.</p>
 
 </section>
 
 <div id="quarto-appendix" class="default"><section class="quarto-appendix-contents" role="doc-bibliography" id="quarto-bibliography"><h2 class="anchored quarto-appendix-heading">References</h2><div id="refs" class="references csl-bib-body hanging-indent" data-entry-spacing="0" role="list">
+<div id="ref-AntonioFernandez2025SMN" class="csl-entry" role="listitem">
+Antonio-Fernández, Hugo, Humberto Vaquera-Huerta, Moisés Michel Rosengaus-Moshinsky, Paulino Pérez-Rodríguez, and José Crossa. 2025. <span>“Daily Meteorological Records for Operational SMN Stations in Mexico (1991–2020) with NASA POWER Co-Located Variables (V1.0.0).”</span> Zenodo. <a href="https://doi.org/10.5281/zenodo.17636066">https://doi.org/10.5281/zenodo.17636066</a>.
+</div>
 <div id="ref-Beck2020" class="csl-entry" role="listitem">
 Beck, Hylke E., Eric F. Wood, Ming Pan, Charles K. Fisher, Diego G. Miralles, Albert I. J. M. van Dijk, and Tim R. McVicar. 2020. <span>“MSWEP V2 Global 3-Hourly 0.1° Precipitation: Methodology and Quantitative Assessment.”</span> <em>Bulletin of the American Meteorological Society</em> 101 (5): 473–500. <a href="https://doi.org/10.1175/BAMS-D-17-0138.1">https://doi.org/10.1175/BAMS-D-17-0138.1</a>.
 </div>
