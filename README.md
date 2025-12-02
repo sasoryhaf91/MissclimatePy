@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/sasoryhaf91/MissclimatePy/actions/workflows/ci.yml/badge.svg)](https://github.com/sasoryhaf91/MissclimatePy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![DOI](https://zenodo.org/badge/DOI/TBA.svg)](https://doi.org/TBA)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17794136.svg)](https://doi.org/10.5281/zenodo.17794136)
 
 ---
 
@@ -261,7 +261,7 @@ A provisional citation is:
 > Antonio-Fernández, H., Vaquera-Huerta, H., Rosengaus-Moshinsky, M. M.,
 > Pérez-Rodríguez, P., & Crossa, J. (2025). *MissClimatePy: Spatial–Temporal
 > Imputation for Daily Climate Station Records in Python* (Version 0.1.1)
-> [Software]. Zenodo. https://doi.org/10.5281/zenodo.TBA
+> [Software]. Zenodo. https://doi.org/10.5281/zenodo.17794136
 
 See [`CITATION.cff`](CITATION.cff) for machine-readable metadata.
 

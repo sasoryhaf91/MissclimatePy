@@ -1,12 +1,9 @@
 cff-version: 1.2.0
-message: >-
-  If you use MissClimatePy in your research, please cite it as shown below.
+message: "If you use this software, please cite it as below."
 title: "MissClimatePy: Spatial–Temporal Imputation for Daily Climate Station Records in Python"
 version: "0.1.1"
-date-released: 2025-12-01
-repository-code: "https://github.com/sasoryhaf91/MissclimatePy"
-license: "MIT"
-type: software
+doi: 10.5281/zenodo.17794136
+date-released: 2025-12-02   
 authors:
   - family-names: Antonio-Fernández
     given-names: Hugo
