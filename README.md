@@ -128,7 +128,7 @@ tmin_imputed = impute_dataset(
     include_target_pct=50.0,       # % of each station's own history in training
     min_station_rows=365,          # Minimum observed days to attempt imputation
     model_kind="rf",
-    model_params={"n_estimators": 300, "random_state": 42, "n_jobs": -1},
+    model_params={"n_estimators": 15, "random_state": 42, "n_jobs": -1},
     show_progress=True,
 )
 
