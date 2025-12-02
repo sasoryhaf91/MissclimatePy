@@ -6,7 +6,7 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
-<meta name="dcterms.date" content="2025-11-16">
+<meta name="dcterms.date" content="2025-12-01">
 
 <title>MissClimatePy: Spatial–Temporal Imputation for Daily Climate Station Records in Python</title>
 <style>
@@ -187,7 +187,7 @@ window.Quarto = {
     <div>
     <div class="quarto-title-meta-heading">Published</div>
     <div class="quarto-title-meta-contents">
-      <p class="date">November 16, 2025</p>
+      <p class="date">December 1, 2025</p>
     </div>
   </div>
   
@@ -215,44 +215,43 @@ window.Quarto = {
 <p>Model backends are provided by a compact registry in <code>models</code>, which wraps scikit-learn regressors under a single factory. Random Forests are the default, but alternative tree ensembles, k-nearest neighbours, multilayer perceptrons, support-vector regression, and linear models are also available. All operate on dense numeric XYZT feature matrices and share a common configuration interface.</p>
 <p>The core station-wise evaluation protocol is implemented in <code>evaluate_stations</code> (module <code>evaluate</code>). For each target station, the function builds a training pool from all other stations or a KNN neighbour subset, applies a user-defined time window and a Minimum Data Requirement filter based on the number of observed target values, and optionally includes a controlled fraction of the station’s own valid rows via a precipitation-friendly stratified sampler over month × dry/wet conditions. It then fits the chosen backend and computes daily, monthly, and annual metrics on a held-out test set, returning (i) a station-level report with metrics, timing, training/test sizes, neighbour information, and median coordinates, and (ii) a prediction table for all evaluated observations.</p>
 <p>Local imputation of a single target variable is handled by <code>impute_dataset</code> (module <code>impute</code>). For each selected station, it trains a <code>RandomForestRegressor</code> using neighbouring stations (or all others) plus an optional fraction of its own observed history. A full daily grid is created over the requested window, predictions are generated for all days, and observed values are preserved whenever available. The function returns a tidy table with exactly <code>[station, date, latitude, longitude, altitude, &lt;target&gt;, source]</code>, where <code>source</code> is <code>"observed"</code> or <code>"imputed"</code>, and can save results to CSV or Parquet, optionally partitioned by station.</p>
-<p>Diagnostics are provided by <code>metrics</code>, <code>masking</code>, and <code>viz</code>. Metrics include mean absolute error (MAE), root mean square error (RMSE), coefficient of determination (<span class="math inline">\(R^2\)</span>), and Kling–Gupta efficiency (KGE). Masking helpers compute percentage-missing profiles and gap statistics, build station × date missingness matrices, and generate deterministic masking scenarios for controlled experiments. Visualisation helpers produce missingness matrices, metric distributions, parity plots, time-series overlays, spatial performance maps, gap histograms, and imputation coverage charts, all returning matplotlib <code>Axes</code> objects. A thin <code>api</code> layer exposes convenience wrappers (<code>evaluate_xyzt</code>, <code>impute_xyzt</code>, <code>build_neighbor_map</code>) that forward to these core routines. MissClimatePy depends only on <code>numpy</code>, <code>pandas</code>, <code>scikit-learn</code>, and <code>matplotlib</code>.</p>
+<p>Diagnostics are provided by <code>metrics</code>, <code>masking</code>, and <code>viz</code>. Metrics include mean absolute error (MAE), root mean square error (RMSE), coefficient of determination (<span class="math inline">\(R^2\)</span>), and Kling–Gupta efficiency (KGE). Masking helpers compute percentage-missing profiles and gap statistics, build station × date missingness matrices, and generate deterministic masking scenarios for controlled experiments. Visualisation helpers produce missingness matrices, metric distributions, parity plots, time-series overlays, spatial performance maps, gap histograms, and imputation coverage charts, all returning matplotlib <code>Axes</code> objects. MissClimatePy depends only on <code>numpy</code>, <code>pandas</code>, <code>scikit-learn</code>, and <code>matplotlib</code>.</p>
 <section id="example" class="level2">
 <h2 class="anchored" data-anchor-id="example">Example</h2>
-<p>The following snippet illustrates a typical workflow using an open Zenodo dataset of daily SMN stations in Mexico <span class="citation" data-cites="AntonioFernandez2025SMN">(<a href="#ref-AntonioFernandez2025SMN" role="doc-biblioref">Antonio-Fernández et al. 2025</a>)</span>. MissClimatePy uses only coordinates and calendar information; other columns are ignored.</p>
+<p>The following snippet illustrates a typical workflow using an open Zenodo dataset of daily SMN stations in Mexico <span class="citation" data-cites="AntonioFernandez2025SMN">(<a href="#ref-AntonioFernandez2025SMN" role="doc-biblioref">Antonio-Fernández et al. 2025</a>)</span>. In this example, MissClimatePy imputes the stations located in the State of Mexico using only coordinates and calendar information; all other columns are ignored.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> missclimatepy.api <span class="im">import</span> evaluate_xyzt, impute_xyzt</span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>url <span class="op">=</span> <span class="st">"https://zenodo.org/records/17636066/files/smn_mx_daily_1991_2020.csv?download=1"</span></span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> pd.read_csv(url, parse_dates<span class="op">=</span>[<span class="st">"date"</span>])</span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>report, preds <span class="op">=</span> evaluate_xyzt(</span>
-<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    df,</span>
-<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    id_col<span class="op">=</span><span class="st">"station"</span>,</span>
-<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    date_col<span class="op">=</span><span class="st">"date"</span>,</span>
-<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    lat_col<span class="op">=</span><span class="st">"lat"</span>,</span>
-<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    lon_col<span class="op">=</span><span class="st">"lon"</span>,</span>
-<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    alt_col<span class="op">=</span><span class="st">"alt"</span>,</span>
-<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    target_col<span class="op">=</span><span class="st">"tmin"</span>,</span>
-<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>    start<span class="op">=</span><span class="st">"1991-01-01"</span>,</span>
-<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    end<span class="op">=</span><span class="st">"2020-12-31"</span>,</span>
-<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>    model_kind<span class="op">=</span><span class="st">"rf"</span>,</span>
-<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    model_params<span class="op">=</span>{<span class="st">"n_estimators"</span>: <span class="dv">300</span>, <span class="st">"random_state"</span>: <span class="dv">42</span>, <span class="st">"n_jobs"</span>: <span class="op">-</span><span class="dv">1</span>},</span>
-<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>imputed <span class="op">=</span> impute_xyzt(</span>
-<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>    df,</span>
-<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>    id_col<span class="op">=</span><span class="st">"station"</span>,</span>
-<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>    date_col<span class="op">=</span><span class="st">"date"</span>,</span>
-<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>    lat_col<span class="op">=</span><span class="st">"lat"</span>,</span>
-<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>    lon_col<span class="op">=</span><span class="st">"lon"</span>,</span>
-<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>    alt_col<span class="op">=</span><span class="st">"alt"</span>,</span>
-<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>    target_col<span class="op">=</span><span class="st">"tmin"</span>,</span>
-<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>    start<span class="op">=</span><span class="st">"1991-01-01"</span>,</span>
-<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>    end<span class="op">=</span><span class="st">"2020-12-31"</span>,</span>
-<span id="cb1-31"><a href="#cb1-31" aria-hidden="true" tabindex="-1"></a>    k_neighbors<span class="op">=</span><span class="dv">20</span>,</span>
-<span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a>    include_target_pct<span class="op">=</span><span class="fl">50.0</span>,</span>
-<span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a>    min_station_rows<span class="op">=</span><span class="dv">365</span>,</span>
-<span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> matplotlib.pyplot <span class="im">as</span> plt</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> missclimatepy.impute <span class="im">import</span> impute_dataset <span class="im">as</span> impute</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> missclimatepy.viz <span class="im">import</span> plot_imputed_series <span class="im">as</span> pis</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>url <span class="op">=</span> <span class="st">"https://zenodo.org/records/17636066/files/smn_mx_daily_1991_2020.csv"</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> pd.read_csv(url, parse_dates<span class="op">=</span>[<span class="st">"date"</span>])</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>tmin_imputed <span class="op">=</span> impute(</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    df, id_col<span class="op">=</span><span class="st">"station"</span>, date_col<span class="op">=</span><span class="st">"date"</span>,</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    lat_col<span class="op">=</span><span class="st">"latitude"</span>, lon_col<span class="op">=</span><span class="st">"longitude"</span>, alt_col<span class="op">=</span><span class="st">"altitude"</span>,</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    target_col<span class="op">=</span><span class="st">"tmin"</span>, start<span class="op">=</span><span class="st">"1991-01-01"</span>, end<span class="op">=</span><span class="st">"2020-12-31"</span>,</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    prefix <span class="op">=</span> [<span class="st">"15"</span>], model_kind<span class="op">=</span><span class="st">"rf"</span>, </span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    model_params<span class="op">=</span>{<span class="st">"n_estimators"</span>: <span class="dv">15</span>, <span class="st">"random_state"</span>: <span class="dv">42</span>, <span class="st">"n_jobs"</span>: <span class="op">-</span><span class="dv">1</span>},</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>ax <span class="op">=</span> pis(</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    df<span class="op">=</span>tmin_imputed,station<span class="op">=</span><span class="dv">15017</span>, id_col<span class="op">=</span><span class="st">"station"</span>, </span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>    date_col<span class="op">=</span><span class="st">"date"</span>, target_col<span class="op">=</span><span class="st">"tmin"</span>, source_col<span class="op">=</span><span class="st">"source"</span>,</span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Minimum temperature imputed – station 15017"</span>,</span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>plt.show()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div id="fig-imputed-series" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-imputed-series-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="figures/imputed_tmin_15017.png" class="img-fluid figure-img">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-imputed-series-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: Example of daily minimum temperature reconstruction for station 15017 (State of Mexico). Original observations are preserved, gaps are filled by the XYZT Random Forest model, and the <code>source</code> flag differentiates observed vs imputed days.
+</figcaption>
+</figure>
+</div>
 </section>
 </section>
 <section id="related-work" class="level1">
