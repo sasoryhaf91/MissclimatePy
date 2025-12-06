@@ -49,17 +49,15 @@ Missing data remain a major limitation of meteorological networks, especially in
 
 # Functionality and Implementation
 
-MissClimatePy operates on long-format `pandas` tables and is organised in small submodules. The `features` utilities handle datetime parsing and calendar feature engineering while remaining schema-agnostic through explicit column-name arguments. The `neighbors` utilities build spatial neighbour maps using haversine distance on latitude–longitude so that K-nearest-neighbour sets can be reused across workflows.
+MissClimatePy operates on long-format `pandas` tables and is organised in a few small submodules. The `features` utilities parse datetimes and build calendar predictors; `neighbors` precomputes K-nearest-neighbour sets in geographic space; and `models` provides a compact registry that wraps scikit-learn regressors under a single factory, with random forests as the default. All models work on dense numeric XYZT matrices.
 
-Model backends are provided by a compact registry in `models`, which wraps scikit-learn regressors under a single factory. Random forests are the default, but other regressors from `scikit-learn` can be plugged in through the same interface. All operate on dense numeric XYZT feature matrices.
+Station-wise evaluation is implemented in `evaluate_stations` (module `evaluate`). For each target station, the function builds a training pool from all other stations or a KNN subset, applies a user-defined time window and Minimum Data Requirement filter, optionally includes a fraction of the station’s own valid rows, fits the chosen backend, and returns multi-scale error metrics together with a prediction table containing observed and modelled values.
 
-The core station-wise evaluation protocol is implemented in `evaluate_stations` (module `evaluate`). For each target station, the function builds a training pool from all other stations or a KNN subset, applies a user-defined time window and a Minimum Data Requirement filter, optionally includes a controlled fraction of the station’s own valid rows, and fits the chosen backend. It then computes daily, monthly, and annual metrics on a held-out test set and returns a station-level report plus a prediction table with observed and modelled values.
+Local imputation of a single target variable is handled by `impute_dataset` (module `impute`). For each selected station, it trains a `RandomForestRegressor` using neighbouring stations (or all others) plus an optional portion of its observed history. It then builds a daily grid over the requested window, preserves observed values, fills gaps with predictions, and tags each row as observed or imputed.
 
-Local imputation of a single target variable is handled by `impute_dataset` (module `impute`). For each selected station, it trains a `RandomForestRegressor` using neighbouring stations (or all others) plus an optional fraction of its own observed history. A full daily grid is created over the requested window, predictions are generated for missing days, and observed values are preserved. The function returns a tidy table with columns `[station, date, latitude, longitude, altitude, <target>, source]`, where `source` is `"observed"` or `"imputed"`.
+Diagnostics are provided by the `metrics`, `masking`, and `viz` modules. `metrics` implements standard error scores (MAE, RMSE, $R^2$, KGE) and aggregation helpers; `masking` summarises coverage and gap statistics and can generate deterministic masking scenarios; and `viz` offers thin `matplotlib` wrappers for missingness matrices, metric distributions, time-series overlays, spatial summaries of performance, and imputation coverage plots.
 
-Diagnostics are provided by the `metrics`, `masking`, and `viz` modules. `metrics` implements standard error scores (MAE, RMSE, $R^2$, KGE) and aggregation helpers; `masking` summarises coverage and gap statistics and can generate deterministic masking scenarios; `viz` offers small `matplotlib` wrappers for missingness matrices, metric distributions, parity plots, time-series overlays, spatial maps of performance, gap histograms, and imputation coverage plots.
-
-MissClimatePy depends on `numpy`, `pandas`, `scikit-learn`, and `matplotlib`, and uses a standard `src/` layout. A focused test suite based on `pytest` is run via GitHub Actions for each push and pull request.
+MissClimatePy depends on `numpy`, `pandas`, `scikit-learn`, and `matplotlib`, follows a standard `src/` layout, and includes a focused `pytest`-based test suite executed via GitHub Actions for each push and pull request.
 
 # Example
 
@@ -100,3 +98,5 @@ Recent developments in climate data reconstruction have expanded the use of mach
 # Acknowledgements
 
 This work was supported by the Secretaría de Ciencia, Humanidades, Tecnología e Innovación (SECIHTI) through a doctoral scholarship to the first author. We acknowledge Colegio de Postgraduados and Universidad Mexiquense del Bicentenario for institutional support. We also thank the International Maize and Wheat Improvement Center (CIMMYT) for fostering collaboration in open climate and agricultural research.
+
+# References
